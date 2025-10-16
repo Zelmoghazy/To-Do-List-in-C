@@ -295,7 +295,6 @@ void swap(int* a, int* b);
 void fast_srand(int seed);
 int fast_rand(void);
 
-
 vec2f_t vec2f(float x, float y);
 vec2f_t vec2f_add(vec2f_t a, vec2f_t b);
 vec2f_t vec2f_sub(vec2f_t a, vec2f_t b);
