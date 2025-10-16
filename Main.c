@@ -1609,7 +1609,7 @@ void text_edit_delete_char(text_edit_state_t *state)
 
 void text_edit_delete_slice(text_edit_state_t *state, i32 count)
 {
-    assert(state->cursor_pos > count);
+    assert(state->cursor_pos >= count);
 
     text_edit_remove_selection(state);
 
