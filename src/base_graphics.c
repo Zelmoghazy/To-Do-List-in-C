@@ -1,4 +1,6 @@
 #include "base_graphics.h"
+#include "GLFW/glfw3.h"
+#include "util.h"
 
 scissor_region_t scissor_stack[MAX_SCISSOR_STACK];
 u32 scissor_stack_size;
@@ -10,43 +12,130 @@ bool scissor_enabled;
 */
 color4_t to_color4(vec3f_t const c)
 {
-    color4_t res = {
-        .r = (u8)MAX(0.0f, MIN(255.0f, c.x * 255.0f)),
-        .g = (u8)MAX(0.0f, MIN(255.0f, c.y * 255.0f)),
-        .b = (u8)MAX(0.0f, MIN(255.0f, c.z * 255.0f)),
+    color4_t color = {
+        .r = (u8)Clamp(0.0f, c.x, 255.0f),
+        .g = (u8)Clamp(0.0f, c.y, 255.0f),
+        .b = (u8)Clamp(0.0f, c.z, 255.0f),
         .a = (u8)255
     };
 
-    return res;
+    return color;
 }
 
 vec3f_t linear_to_gamma(vec3f_t color)
 {
-    vec3f_t res = {0.0f,0.0f,0.0f};
-    if(color.x > 0) res.x = sqrt_f32(color.x);
-    if(color.y > 0) res.y = sqrt_f32(color.y);
-    if(color.z > 0) res.z = sqrt_f32(color.z);
-    return res;
+    vec3f_t col = {0.0f,0.0f,0.0f};
+
+    if(color.x > 0){
+        col.x = sqrt_f32(color.x);
+    } 
+    if(color.y > 0){
+        col.y = sqrt_f32(color.y);
+    }
+    if(color.z > 0){
+        col.z = sqrt_f32(color.z);
+    }
+
+    return col;
 }
 
-void hsv_to_rgb(float h, float s, float v, float *r, float *g, float *b) 
+/* 
+    h : the hue, the pure color
+    s : the saturation, color's intensity or purity
+    v : the value, color's brightness
+ */
+void hsv_to_rgb(f32 h, f32 s, f32 v, f32 *r, f32 *g, f32 *b) 
 {
-    int i = (int)(h * 6.0f);
-    float f = h * 6.0f - i;
-    float p = v * (1.0f - s);
-    float q = v * (1.0f - f * s);
-    float t = v * (1.0f - (1.0f - f) * s);
+    i32 i = (i32)(h * 6.0f);
+    f32 f = h * 6.0f - i;
+    f32 p = v * (1.0f - s);
+    f32 q = v * (1.0f - f * s);
+    f32 t = v * (1.0f - (1.0f - f) * s);
     
-    switch (i % 6) {
-        case 0: *r = v; *g = t; *b = p; break;
-        case 1: *r = q; *g = v; *b = p; break;
-        case 2: *r = p; *g = v; *b = t; break;
-        case 3: *r = p; *g = q; *b = v; break;
-        case 4: *r = t; *g = p; *b = v; break;
-        case 5: *r = v; *g = p; *b = q; break;
+    switch (i % 6) 
+    {
+        case 0: 
+            *r = v; *g = t; *b = p; 
+            break;
+        case 1: 
+            *r = q; *g = v; *b = p; 
+            break;
+        case 2: 
+            *r = p; *g = v; *b = t; 
+            break;
+        case 3: 
+            *r = p; *g = q; *b = v; 
+            break;
+        case 4: 
+            *r = t; *g = p; *b = v; 
+            break;
+        case 5: 
+            *r = v; *g = p; *b = q; 
+            break;
     }
 }
 
+/* 
+            f32 noise = gradient_noise((f32)x, (f32)y);
+            vec3f_t noise_offset = {
+                (1.0f / 255.0f) * noise - (0.5f / 255.0f),
+                (1.0f / 255.0f) * noise - (0.5f / 255.0f),
+                (1.0f / 255.0f) * noise - (0.5f / 255.0f)
+            };
+            color = vec3f_add(color, noise_offset);
+ */
+
+f32 gradient_noise(f32 x, f32 y) 
+{
+    const f32 magic_x = 0.06711056f;
+    const f32 magic_y = 0.00583715f;
+    const f32 magic_z = 52.9829189f;
+    
+    f32 dot_product = x * magic_x + y * magic_y;
+    f32 fract_dot = dot_product - floorf(dot_product);
+    f32 result = magic_z * fract_dot;
+    return result - floorf(result);
+}
+
+color4_t color4_lerp(color4_t c1, color4_t c2, f32 t)
+{
+    t = Clamp(0.0f, t, 1.0f);
+    
+    color4_t result = {
+        .r = (u8)(c1.r + t * (c2.r - c1.r)),
+        .g = (u8)(c1.g + t * (c2.g - c1.g)),
+        .b = (u8)(c1.b + t * (c2.b - c1.b)),
+        .a = (u8)(c1.a + t * (c2.a - c1.a))
+    };
+    
+    return result;
+}
+color4_t average(color4_t c, color4_t d)
+{
+    return (color4_t){
+        (u8)((c.r / 2) + (d.r / 2) + ((c.r & 1) & (d.r & 1))),
+        (u8)((c.g / 2) + (d.g / 2) + ((c.g & 1) & (d.g & 1))),
+        (u8)((c.b / 2) + (d.b / 2) + ((c.b & 1) & (d.b & 1))),
+        (u8)((c.a / 2) + (d.a / 2) + ((c.a & 1) & (d.a & 1)))
+    };
+}
+
+color4_t dark(color4_t c)
+{
+    return average(c, RGB_GREY(0));
+}
+
+color4_t lite(color4_t c)
+{
+    return average(c, COLOR_WHITE);
+}
+
+/*
+    Each pixel contains some color information
+    consisting of three values: red, green and blue 
+    and can also contain information about transparency with an
+    additional alpha channel indicating the opacity of each pixel
+ */
 inline void set_pixel(image_view_t const *img, i32 x, i32 y, color4_t color) 
 {
     if (x >= 0 && x < (i32)img->width &&
@@ -58,29 +147,39 @@ inline void set_pixel(image_view_t const *img, i32 x, i32 y, color4_t color)
 
 inline color4_t get_pixel(image_view_t const *img, i32 x, i32 y) 
 {
+    color4_t color = {0, 0, 0, 0};
+
     if (x >= 0 && x < (i32)img->width &&
         y >= 0 && y < (i32)img->height) 
     {
-        return BUF_AT(img, x, y);
+        color =  BUF_AT(img, x, y);
     }
-    return (color4_t){0, 0, 0, 0};
+
+    return color;
 }
 
 /* alpha blending to combine stuff depending on transparency */
 inline color4_t blend_pixel(color4_t dst, color4_t src) 
 {
-    if (src.a == 255) return src;
-    if (src.a == 0)   return dst;
+    if (IS_OPAQUE(src))
+    {
+        return src;
+    }
+
+    if (IS_INVIS(src))  
+    {
+        return dst;
+    }
     
     u8 inv_alpha = 255 - src.a;
 
-    // Linear interpolation between source and destination
     color4_t result = {
         .r = (src.r * src.a + dst.r * inv_alpha) / 255,
         .g = (src.g * src.a + dst.g * inv_alpha) / 255,
         .b = (src.b * src.a + dst.b * inv_alpha) / 255,
         .a = src.a + (dst.a * inv_alpha) / 255
     };
+
     return result;
 }
 
@@ -90,14 +189,14 @@ inline void set_pixel_blend(image_view_t const *img, i32 x, i32 y, color4_t colo
     if (x >= 0 && x < (i32)img->width &&
         y >= 0 && y < (i32)img->height) 
     {
-        if (color.a == 255) 
+        if (IS_OPAQUE(color)) 
         {
             BUF_AT(img, x, y) = color;
         } 
         else 
         {
             color4_t dst = get_pixel(img, x, y);
-            BUF_AT(img, x, y) = blend_pixel(dst, color);
+            set_pixel(img,x,y,blend_pixel(dst, color));
         }
     }
 }
@@ -121,7 +220,34 @@ void clear_screen(image_view_t const *color_buf, color4_t const color)
     {
         for(u32 x = 0; x < color_buf->width; ++x)
         {    
-            set_pixel(color_buf, x, y, color);    
+            BUF_AT(color_buf, x, y) = color;
+        }
+    }
+}
+
+void clear_screen_radial_gradient(image_view_t const *color_buf,
+                                       color4_t const color0,
+                                       color4_t const color1)
+{
+    f32 center_x = color_buf->width * 0.5f;
+    f32 center_y = color_buf->height * 0.5f;
+    f32 max_dist_sq = center_x * center_x + center_y * center_y;
+    
+    for (u32 y = 0; y < color_buf->height; ++y) {
+        for (u32 x = 0; x < color_buf->width; ++x) 
+        {
+            f32 dx = (f32)x - center_x;
+            f32 dy = (f32)y - center_y;
+            f32 dist_sq = dx * dx + dy * dy;
+            
+            f32 t = Clamp(0.0f, dist_sq / max_dist_sq, 1.0f);
+            
+            u8 r = (u8)LERP_F32(color0.r, color1.r, t);
+            u8 g = (u8)LERP_F32(color0.g, color1.g, t);
+            u8 b = (u8)LERP_F32(color0.b, color1.b, t);
+            
+            color4_t pixel = {r, g, b, 255};
+            BUF_AT(color_buf, x, y) = pixel;
         }
     }
 }
@@ -134,7 +260,7 @@ void draw_hline(image_view_t const *color_buf, i32 y, i32 x0, i32 x1, color4_t c
 
     // Ensure x0 <= x1
     if (x0 > x1) {
-        swap(&x0, &x1);
+        SWAP(x0, x1, i32);
     }
 
     x0 = MAX(0, x0);
@@ -154,7 +280,7 @@ void draw_vline(image_view_t const *color_buf, i32 x, i32 y0, i32 y1, color4_t c
 
     // Ensure y0 <= y1
     if (y0 > y1) {
-        swap(&y0, &y1);
+        SWAP(y0, y1, i32);
     }
 
     y0 = MAX(0, y0);
@@ -171,24 +297,24 @@ void draw_line(image_view_t const *color_buf, i32 x0, i32 y0, i32 x1, i32 y1, co
     
     // If the line is steep, we transpose the image
     if (abs(x0 - x1) < abs(y0 - y1)) {
-        swap(&x0, &y0);
-        swap(&x1, &y1);
+        SWAP(x0, y0, i32);
+        SWAP(x1, y1, i32);
         steep = true;
     }
     
     // Make it left-to-right
     if (x0 > x1) {
-        swap(&x0, &x1);
-        swap(&y0, &y1);
+        SWAP(x0, x1, i32);
+        SWAP(y0, y1, i32);
     }
     
-    int dx = x1 - x0;
-    int dy = y1 - y0;
-    int derror2 = abs(dy) * 2;
-    int error2 = 0;
-    int y = y0;
+    i32 dx = x1 - x0;
+    i32 dy = y1 - y0;
+    i32 derror2 = abs(dy) * 2;
+    i32 error2 = 0;
+    i32 y = y0;
     
-    for (int x = x0; x <= x1; x++) 
+    for (i32 x = x0; x <= x1; x++) 
     {
         if (steep) 
         {
@@ -262,7 +388,7 @@ void draw_aaline(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, color4_t col
     set_pixel_blend(img, x2, y2, color);
 }
 
-void draw_rect_outline_wh(image_view_t const *color_buf, int x0, int y0, int w , int h , color4_t const color)
+void draw_rect_outline_wh(image_view_t const *color_buf, i32 x0, i32 y0, i32 w , i32 h , color4_t const color)
 {
    if (h == 1) 
    {
@@ -274,7 +400,7 @@ void draw_rect_outline_wh(image_view_t const *color_buf, int x0, int y0, int w ,
    }
    else if (h > 1 && w > 1) 
    {
-      int x1 = x0+w-1, y1 = y0+h-1;
+      i32 x1 = x0+w-1, y1 = y0+h-1;
       draw_hline(color_buf, y0,x0,x1-1, color);
       draw_vline(color_buf, x1,y0,y1-1, color);
       draw_hline(color_buf, y1,x0+1,x1, color);
@@ -282,24 +408,24 @@ void draw_rect_outline_wh(image_view_t const *color_buf, int x0, int y0, int w ,
    }
 }
 
-void draw_rect_outline(image_view_t const *color_buf, int x0, int y0, int x1, int y1, color4_t const color)
+void draw_rect_outline(image_view_t const *color_buf, i32 x0, i32 y0, i32 x1, i32 y1, color4_t const color)
 {
     if (x1 < x0) 
     { 
-        swap(&x1, &x0);
+        SWAP(x1, x0, i32);
     }
     if (y1 < y0) 
     { 
-        swap(&y1, &y0);
+        SWAP(y1, y0, i32);
     }
     draw_rect_outline_wh(color_buf, x0,y0, x1-x0+1, y1-y0+1, color);
 }
 
-void draw_rect_solid_wh(image_view_t const *color_buf, int x0, int y0, int w , int h , color4_t const color)
+void draw_rect_solid_wh(image_view_t const *color_buf, i32 x0, i32 y0, i32 w , i32 h , color4_t const color)
 {
     if (w > 0) 
     {   
-        int j, x1 = x0 + w -1;
+        i32 j, x1 = x0 + w -1;
         for (j=0; j < h; ++j)
         {
             draw_hline(color_buf, y0+j, x0, x1, color);
@@ -307,15 +433,15 @@ void draw_rect_solid_wh(image_view_t const *color_buf, int x0, int y0, int w , i
     }
 }
   
-void draw_rect_solid(image_view_t const *color_buf, int x0, int y0, int x1, int y1, color4_t const color)
+void draw_rect_solid(image_view_t const *color_buf, i32 x0, i32 y0, i32 x1, i32 y1, color4_t const color)
 {
     if (x1 < x0) 
     { 
-        swap(&x1, &x0);
+        SWAP(x1, x0, i32);
     }
     if (y1 < y0) 
     { 
-        swap(&y1, &y0);
+        SWAP(y1, y0, i32);
     }
     draw_rect_solid_wh(color_buf, x0,y0, x1-x0+1, y1-y0+1, color);
 }
@@ -353,6 +479,92 @@ void fill_circle(image_view_t *img, i32 cx, i32 cy, i32 radius, color4_t color)
         for (i32 x = -radius; x <= radius; x++) {
             if (x * x + y * y <= radius * radius) {
                 set_pixel_blend(img, cx + x, cy + y, color);
+            }
+        }
+    }
+}
+
+void draw_circle_aa(image_view_t *img, i32 cx, i32 cy, f32 radius, color4_t color) 
+{
+    if (radius <= 0) return;
+    
+    f32 rsq = radius * radius;
+    i32 ffd = (i32)roundf(radius / sqrtf(2.0f)); // forty-five degree coord
+    
+    for (i32 xi = 0; xi <= ffd; xi++) 
+    {
+        f32 yj = sqrtf(rsq - xi * xi);
+        f32 frc = yj - floorf(yj);
+        i32 flr = (i32)floorf(yj);
+        i8 weight1 = (i8)((1.0f - frc) * 255.0f);
+        i8 weight2 = (i8)(frc * 255.0f);
+        
+        set_pixel_weighted(img, cx + xi, cy + flr, color, weight1);
+        set_pixel_weighted(img, cx - xi, cy + flr, color, weight1);
+        set_pixel_weighted(img, cx + xi, cy - flr, color, weight1);
+        set_pixel_weighted(img, cx - xi, cy - flr, color, weight1);
+        
+        set_pixel_weighted(img, cx + xi, cy + flr + 1, color, weight2);
+        set_pixel_weighted(img, cx - xi, cy + flr + 1, color, weight2);
+        set_pixel_weighted(img, cx + xi, cy - flr - 1, color, weight2);
+        set_pixel_weighted(img, cx - xi, cy - flr - 1, color, weight2);
+    }
+    
+    for (i32 yi = 0; yi <= ffd; yi++) 
+    {
+        f32 xj = sqrtf(rsq - yi * yi);
+        f32 frc = xj - floorf(xj);
+        i32 flr = (i32)floorf(xj);
+        i8 weight1 = (i8)((1.0f - frc) * 255.0f);
+        i8 weight2 = (i8)(frc * 255.0f);
+        
+        set_pixel_weighted(img, cx + flr, cy + yi, color, weight1);
+        set_pixel_weighted(img, cx - flr, cy + yi, color, weight1);
+        set_pixel_weighted(img, cx + flr, cy - yi, color, weight1);
+        set_pixel_weighted(img, cx - flr, cy - yi, color, weight1);
+        
+        set_pixel_weighted(img, cx + flr + 1, cy + yi, color, weight2);
+        set_pixel_weighted(img, cx - flr - 1, cy + yi, color, weight2);
+        set_pixel_weighted(img, cx + flr + 1, cy - yi, color, weight2);
+        set_pixel_weighted(img, cx - flr - 1, cy - yi, color, weight2);
+    }
+}
+
+void draw_circle_filled_aa(image_view_t *img, i32 cx, i32 cy, f32 radius, color4_t color) 
+{
+    if (radius <= 0) return;
+    
+    i32 r_ceil = (i32)ceilf(radius);
+    f32 r_inner = radius - 1.0f;
+    f32 r_inner_sq = r_inner * r_inner;
+    f32 r_outer_sq = (radius + 1.0f) * (radius + 1.0f);
+    
+    for (i32 y = -r_ceil - 1; y <= r_ceil + 1; y++) 
+    {
+        f32 y_sq = y * y;
+        i32 x_max = (i32)sqrtf(r_outer_sq - y_sq) + 1;
+        
+        for (i32 x = -x_max; x <= x_max; x++) 
+        {
+            f32 dist_sq = x * x + y_sq;
+            
+            if (dist_sq <= r_inner_sq) 
+            {
+                set_pixel_blend(img, cx + x, cy + y, color);
+            }
+            else if (dist_sq < r_outer_sq) 
+            {
+                f32 dist = sqrtf(dist_sq);
+                f32 coverage = radius - dist + 0.5f;
+                if (coverage > 0.0f && coverage < 1.0f) 
+                {
+                    i8 weight = (i8)(coverage * 255.0f);
+                    set_pixel_weighted(img, cx + x, cy + y, color, weight);
+                }
+                else if (coverage >= 1.0f) 
+                {
+                    set_pixel_blend(img, cx + x, cy + y, color);
+                }
             }
         }
     }
@@ -427,9 +639,12 @@ void draw_triangle(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, i32 x3, i3
     draw_line(img, x3, y3, x1, y1, color);
 }
 
- void fill_triangle_scanline(image_view_t *img, i32 y, i32 x1, i32 x2, color4_t color) 
+void fill_triangle_scanline(image_view_t *img, i32 y, i32 x1, i32 x2, color4_t color) 
 {
-    if (x1 > x2) { i32 tmp = x1; x1 = x2; x2 = tmp; }
+    if (x1 > x2) { 
+        SWAP(x1, x2, i32);
+    }
+
     draw_hline(img, x1, x2, y, color);
 }
 
@@ -463,7 +678,7 @@ void fill_triangle(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, i32 x3, i3
     }
 }
 
- void draw_arc_quadrant(image_view_t *img, i32 cx, i32 cy, i32 radius, i32 quadrant, color4_t color) 
+void draw_arc_quadrant(image_view_t *img, i32 cx, i32 cy, i32 radius, i32 quadrant, color4_t color) 
 {
     i32 x = 0;
     i32 y = radius;
@@ -471,19 +686,19 @@ void fill_triangle(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, i32 x3, i3
     
     while (y >= x) {
         switch (quadrant) {
-            case 0: // Top-right
+            case 0: 
                 set_pixel_blend(img, cx + x, cy - y, color);
                 set_pixel_blend(img, cx + y, cy - x, color);
                 break;
-            case 1: // Top-left
+            case 1: 
                 set_pixel_blend(img, cx - x, cy - y, color);
                 set_pixel_blend(img, cx - y, cy - x, color);
                 break;
-            case 2: // Bottom-left
+            case 2: 
                 set_pixel_blend(img, cx - x, cy + y, color);
                 set_pixel_blend(img, cx - y, cy + x, color);
                 break;
-            case 3: // Bottom-right
+            case 3: 
                 set_pixel_blend(img, cx + x, cy + y, color);
                 set_pixel_blend(img, cx + y, cy + x, color);
                 break;
@@ -499,95 +714,84 @@ void fill_triangle(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, i32 x3, i3
     }
 }
 
- void fill_arc_quadrant(image_view_t *img, i32 cx, i32 cy, i32 radius, int quadrant, color4_t color) 
+void fill_arc_quadrant(image_view_t *img, i32 cx, i32 cy, i32 radius, i32 quadrant, color4_t color) 
 {
-    for (i32 y = 0; y <= radius; y++) {
-        for (i32 x = 0; x <= radius; x++) {
-            if (x * x + y * y <= radius * radius) {
-                switch (quadrant) {
-                    case 0: // Top-right
-                        set_pixel_blend(img, cx + x, cy - y, color);
-                        break;
-                    case 1: // Top-left
-                        set_pixel_blend(img, cx - x, cy - y, color);
-                        break;
-                    case 2: // Bottom-left
-                        set_pixel_blend(img, cx - x, cy + y, color);
-                        break;
-                    case 3: // Bottom-right
-                        set_pixel_blend(img, cx + x, cy + y, color);
-                        break;
-                }
+    i32 r_squared = radius * radius;
+    
+    for (i32 y = 0; y <= radius; y++) 
+    {
+        i32 y_squared = y * y;
+        
+        for (i32 x = 0; x <= radius; x++) 
+        {
+            if (x * x + y_squared > r_squared) 
+            {
+                break; 
             }
+            
+            i32 px, py;
+            switch (quadrant) {
+                case 0: px = cx + x; py = cy - y; break;
+                case 1: px = cx - x; py = cy - y; break;
+                case 2: px = cx - x; py = cy + y; break;
+                case 3: px = cx + x; py = cy + y; break;
+                default: continue;
+            }
+            
+            set_pixel_blend(img, px, py, color);
         }
     }
 }
 
 void draw_rounded_rectangle(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, i32 radius, color4_t color) 
 {
-    if (x1 > x2) { i32 tmp = x1; x1 = x2; x2 = tmp; }
-    if (y1 > y2) { i32 tmp = y1; y1 = y2; y2 = tmp; }
+    if (x1 > x2) { SWAP(x1, x2, i32); }
+    if (y1 > y2) { SWAP(y1, y2, i32); }
     
-    i32 w = x2 - x1;
-    i32 h = y2 - y1;
+    i32 w = x2 - x1 + 1;
+    i32 h = y2 - y1 + 1;
     
-    // Clamp radius to maximum possible
-    if (radius * 2 > w) radius = w / 2;
-    if (radius * 2 > h) radius = h / 2;
+    radius = ClampTop(radius, MIN(w,h) / 2);
     
     if (radius <= 1) {
         draw_rect_outline(img, x1, y1, x2, y2, color);
         return;
     }
     
-    // Draw corner arcs
-    draw_arc_quadrant(img, x1 + radius, y1 + radius, radius, 1, color); // Top-left
-    draw_arc_quadrant(img, x2 - radius, y1 + radius, radius, 0, color); // Top-right
-    draw_arc_quadrant(img, x1 + radius, y2 - radius, radius, 2, color); // Bottom-left
-    draw_arc_quadrant(img, x2 - radius, y2 - radius, radius, 3, color); // Bottom-right
+    draw_arc_quadrant(img, x1 + radius, y1 + radius, radius, 1, color);
+    draw_arc_quadrant(img, x2 - radius, y1 + radius, radius, 0, color);
+    draw_arc_quadrant(img, x1 + radius, y2 - radius, radius, 2, color);
+    draw_arc_quadrant(img, x2 - radius, y2 - radius, radius, 3, color);
     
-    // Draw straight edges
-    if (x1 + radius <= x2 - radius) {
-        draw_hline(img, y1, x1 + radius, x2 - radius, color); // Top
-        draw_hline(img, y2, x1 + radius, x2 - radius, color); // Bottom
-    }
-    if (y1 + radius <= y2 - radius) {
-        draw_vline(img, x1, y1 + radius, y2 - radius, color); // Left
-        draw_vline(img, x2, y1 + radius, y2 - radius, color); // Right
-    }
+    draw_hline(img, y1, x1 + radius + 1, x2 - radius - 1, color); 
+    draw_hline(img, y2, x1 + radius + 1, x2 - radius - 1, color); 
+    draw_vline(img, x1, y1 + radius + 1, y2 - radius - 1, color); 
+    draw_vline(img, x2, y1 + radius + 1, y2 - radius - 1, color); 
 }
 
 void fill_rounded_rectangle(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, i32 radius, color4_t color) 
 {
-    if (x1 > x2) { i32 tmp = x1; x1 = x2; x2 = tmp; }
-    if (y1 > y2) { i32 tmp = y1; y1 = y2; y2 = tmp; }
+    if (x1 > x2) { SWAP(x1, x2, i32); }
+    if (y1 > y2) { SWAP(y1, y2, i32); }
     
-    i32 w = x2 - x1;
-    i32 h = y2 - y1;
+    i32 w = x2 - x1 + 1;
+    i32 h = y2 - y1 + 1;
     
-    // Clamp radius to maximum possible
-    if (radius * 2 > w) radius = w / 2;
-    if (radius * 2 > h) radius = h / 2;
-    
+    radius = ClampTop(radius, MIN(w,h) / 2);
+
     if (radius <= 1) {
         draw_rect_solid(img, x1, y1, x2, y2, color);
         return;
     }
     
-    // Fill corner arcs
-    fill_arc_quadrant(img, x1 + radius, y1 + radius, radius, 1, color); // Top-left
-    fill_arc_quadrant(img, x2 - radius, y1 + radius, radius, 0, color); // Top-right
-    fill_arc_quadrant(img, x1 + radius, y2 - radius, radius, 2, color); // Bottom-left
-    fill_arc_quadrant(img, x2 - radius, y2 - radius, radius, 3, color); // Bottom-right
+    fill_arc_quadrant(img, x1 + radius, y1 + radius, radius, 1, color); 
+    fill_arc_quadrant(img, x2 - radius, y1 + radius, radius, 0, color); 
+    fill_arc_quadrant(img, x1 + radius, y2 - radius, radius, 2, color); 
+    fill_arc_quadrant(img, x2 - radius, y2 - radius, radius, 3, color); 
     
-    // Fill main rectangular areas
-    if (x1 + radius <= x2 - radius) {
-        draw_rect_solid(img, x1 + radius, y1, x2 - radius, y2, color); // Middle section
-    }
-    if (y1 + radius <= y2 - radius) {
-        draw_rect_solid(img, x1, y1 + radius, x1 + radius - 1, y2 - radius, color); // Left section
-        draw_rect_solid(img, x2 - radius + 1, y1 + radius, x2, y2 - radius, color); // Right section
-    }
+    draw_rect_solid(img, x1 + radius, y1, x2 - radius, y1 + radius - 1, color); 
+    draw_rect_solid(img, x1 + radius, y2 - radius + 1, x2 - radius, y2, color); 
+    draw_rect_solid(img, x1, y1 + radius, x2, y2 - radius, color); 
 }
 
 void fill_rounded_rectangle_wh(image_view_t *img, i32 x, i32 y, i32 width, i32 height, i32 radius, color4_t color) 
@@ -596,6 +800,88 @@ void fill_rounded_rectangle_wh(image_view_t *img, i32 x, i32 y, i32 width, i32 h
     i32 y2 = y + height;
     
     fill_rounded_rectangle(img, x, y, x2, y2, radius, color);
+}
+
+static void fill_arc_quadrant_aa(image_view_t *img, i32 cx, i32 cy, f32 radius, i32 quadrant, color4_t color)
+{
+    if (radius <= 0) return;
+    
+    f32 rsq = radius * radius;
+    i32 r_ceil = (i32)ceilf(radius);
+    
+    for (i32 yi = 0; yi <= r_ceil; yi++)
+    {
+        if (yi * yi > rsq) continue;
+        
+        f32 xj = sqrtf(rsq - yi * yi);
+        f32 frc = xj - floorf(xj);
+        i32 flr = (i32)floorf(xj);
+        i8 weight_outer = (i8)(frc * 255.0f);
+        
+        switch (quadrant) {
+            case 0: // Top-right
+                for (i32 x = 0; x <= flr; x++)
+                    set_pixel_blend(img, cx + x, cy - yi, color);
+                set_pixel_weighted(img, cx + flr + 1, cy - yi, color, weight_outer);
+                break;
+            case 1: // Top-left
+                for (i32 x = -flr; x <= 0; x++)
+                    set_pixel_blend(img, cx + x, cy - yi, color);
+                set_pixel_weighted(img, cx - flr - 1, cy - yi, color, weight_outer);
+                break;
+            case 2: // Bottom-left
+                for (i32 x = -flr; x <= 0; x++)
+                    set_pixel_blend(img, cx + x, cy + yi, color);
+                set_pixel_weighted(img, cx - flr - 1, cy + yi, color, weight_outer);
+                break;
+            case 3: // Bottom-right
+                for (i32 x = 0; x <= flr; x++)
+                    set_pixel_blend(img, cx + x, cy + yi, color);
+                set_pixel_weighted(img, cx + flr + 1, cy + yi, color, weight_outer);
+                break;
+        }
+    }
+}
+
+void fill_rounded_rectangle_aa(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, f32 radius, color4_t color) 
+{
+    if (x1 == x2 && y1 == y2) {
+        set_pixel_blend(img, x1, y1, color);
+        return;
+    }
+    
+    if (x1 > x2) { SWAP(x1, x2, i32); }
+    if (y1 > y2) { SWAP(y1, y2, i32); }
+    
+    i32 w = x2 - x1 + 1;
+    i32 h = y2 - y1 + 1;
+    
+    radius = ClampTop(radius, MIN(w,h) / 2);
+    
+    if (radius <= 1) {
+        draw_rect_solid(img, x1, y1, x2, y2, color);
+        return;
+    }
+    
+    i32 r = (i32)ceilf(radius);
+    
+    fill_arc_quadrant_aa(img, x1 + r, y1 + r, radius, 1, color);
+    fill_arc_quadrant_aa(img, x2 - r, y1 + r, radius, 0, color);
+    fill_arc_quadrant_aa(img, x1 + r, y2 - r, radius, 2, color);
+    fill_arc_quadrant_aa(img, x2 - r, y2 - r, radius, 3, color);
+    
+    i32 cx1 = x1 + r;
+    i32 cx2 = x2 - r;
+    i32 cy1 = y1 + r;
+    i32 cy2 = y2 - r;
+    
+    if (cx1 <= cx2) {
+        draw_rect_solid(img, cx1, y1, cx2, y2, color);
+    }
+    if (cy1 <= cy2) {
+        draw_rect_solid(img, x1, cy1, cx1 - 1, cy2, color);
+        draw_rect_solid(img, cx2 + 1, cy1, x2, cy2, color);
+    }
 }
 
 #define TGA_HEADER(buf,w,h,b) \
@@ -771,21 +1057,13 @@ void clip_rect_to_current_scissor(i32 *x, i32 *y, u32 *width, u32 *height)
     *height = intersection.h ? intersection.h : 0;
 }
 
-void set_pixel_scissored(image_view_t const *img, i32 x, i32 y, color4_t color)
+void set_pixel_scissored(image_view_t *img, i32 x, i32 y, color4_t color)
 {
-    if (x < 0 || y < 0 || 
-        x >= (i32)img->width || 
-        y >= (i32)img->height)
-    {
-        return;
-    }
-    
-    // Apply scissor test
     if (!pixel_in_current_scissor(x, y)){
         return;
     }
     
-    set_pixel(img, x, y, color);
+    draw_pixel(img, x, y, color);
 }
 
 void draw_rect_scissored(image_view_t const *img, i32 x, i32 y, u32 width, u32 height, color4_t color)
@@ -824,187 +1102,8 @@ void clear_scissor_stack()
     scissor_enabled = false;
 }
 
-animation_t animation_items[ANIMATION_MAX_ITEMS];
-int animation_item_count;
 
-/* https://easings.net/ */
-f64 apply_easing(f64 t, easing_type easing) 
-{
-    switch (easing) 
-    {
-        case EASE_LINEAR:
-            return t;
-            
-        case EASE_IN_QUAD:
-            return t * t;
-            
-        case EASE_OUT_QUAD:
-            return t * (2.0 - t);
-            
-        case EASE_IN_OUT_QUAD:
-            if (t < 0.5) return 2.0 * t * t;
-            return -1.0 + (4.0 - 2.0 * t) * t;
-            
-        case EASE_IN_CUBIC:
-            return t * t * t;
-            
-        case EASE_OUT_CUBIC:
-            return (--t) * t * t + 1.0;
-            
-        case EASE_IN_OUT_CUBIC:
-            if (t < 0.5) return 4.0 * t * t * t;
-            return (t - 1.0) * (2.0 * t - 2.0) * (2.0 * t - 2.0) + 1.0;
-            
-        case EASE_IN_SINE:
-            return 1.0 - (f64)cosf(t * M_PI_2);
-            
-        case EASE_OUT_SINE:
-            return (f64)sinf(t * M_PI_2);
-            
-        case EASE_IN_OUT_SINE:
-            return -0.5 * ((f64)cosf(M_PI * t) - 1.0);
-
-        case EASE_OUT_BOUNCE:
-            const f64 n1 = 7.5625;
-            const f64 d1 = 2.75;
-
-            if (t < 1.0 / d1) {
-                return n1 * t * t;
-            } else if (t < 2.0 / d1) {
-                return n1 * (t -= 1.5 / d1) * t + 0.75;
-            } else if (t < 2.5 / d1) {
-                return n1 * (t -= 2.25 / d1) * t + 0.9375;
-            } else {
-                return n1 * (t -= 2.625 / d1) * t + 0.984375;
-            }
-        default:
-            return t;
-    }
-}
-
-void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type easing) 
-{
-    for (int i = 0; i < animation_item_count; i++) 
-    {
-        animation_t *it = &animation_items[i];
-        if (it->id == id) {
-            // it->elapsed = 0;      
-            it->start = it->current;
-            it->target = target;
-            it->elapsed = 0;
-            it->duration = duration;
-            return;
-        }
-    }
-
-    // push new item if we have room
-    if (animation_item_count < ANIMATION_MAX_ITEMS) 
-    {
-        animation_items[animation_item_count++] = (animation_t){
-            .id = id,
-            .start = start,
-            .target = target,
-            .easing = easing,
-            .duration = duration,
-            .elapsed = 0,
-            .done = false
-        };
-    }
-}
-
-void animation_update(f64 dt) 
-{
-    for(int i = animation_item_count-1; i>=0; i--)
-    {
-        animation_t *anim = &animation_items[i];
-        
-        anim->elapsed += dt;
-        
-        if (anim->elapsed >= anim->duration) 
-        {
-            anim->done = true;
-            // clamp it to target
-            anim->current = anim->target;
-            // remove it from the list when done
-            // just replace it with the last item and decrement the count
-            *anim = animation_items[--animation_item_count];
-            continue;
-        }
-        
-        // progress in animation
-        f64 t = anim->elapsed / anim->duration;
-        f64 eased_t = apply_easing(t, anim->easing);
-        
-        anim->current = LERP_F32(anim->start, anim->target, eased_t);
-    }
-}
-
-void animation_get(u64 id, f32 *current)
-{
-    for (int i = 0; i < animation_item_count; i++) 
-    {
-        animation_t *it = &animation_items[i];
-
-        if (it->id == id) {
-            *current = it->current;
-        }
-    }
-}
-
-void animation_pingpong(u64 id, f32 start, f32 target, f32 duration, easing_type easing)
-{
-    static bool reached_top = false;
-    static bool reached_bottom = false;
-
-    f32 begin = MIN(start, target);
-    f32 end = MAX(start, target);
-
-    f32 current = 0;
-
-    animation_get(id, &current);
-
-    if(current >= end-EPSILON_F32 && !reached_top)
-    {
-        animation_start((u64)&current, end, begin, duration, easing);
-        reached_bottom = false;
-        reached_top = true;
-    }
-    else if(current <= begin+EPSILON_F32 && !reached_bottom)
-    {
-        animation_start((u64)&current ,begin, end, duration, easing);
-        reached_top = false;
-        reached_bottom = true;
-    }
-}
-
-typedef struct 
-{
-    f32 radius;
-    f32 angle;  // rad
-} polar_t;
-
-typedef struct 
-{
-    f32 inner_radius;
-    f32 outer_radius;
-    f32 angle_start;
-    f32 angle_end;
-} radial_segment_t;
-
-typedef struct 
-{
-    f32 center_x, center_y;
-    f32 scale_x, scale_y;
-    i32   num_segments;
-    f32 inner_radius;
-    f32 outer_radius;
-    f32 rotation;              
-    f32 gap_factor;    
-} radial_layout_t;
-
-static inline void polar_to_cartesian(polar_t polar, f32 center_x, f32 center_y, 
-                                      f32 scale_x, f32 scale_y,
-                                      f32 *out_x, f32 *out_y) 
+static inline void polar_to_cartesian(polar_t polar, f32 center_x, f32 center_y,  f32 scale_x, f32 scale_y, f32 *out_x, f32 *out_y) 
 {
     *out_x = center_x + (polar.radius * cosf(polar.angle)) * scale_x;
     *out_y = center_y + (polar.radius * sinf(polar.angle)) * scale_y;
@@ -1016,7 +1115,6 @@ static inline f32 radial_angle_step(i32 num_segments, f32 gap_factor)
     return full_step * (1.0f - gap_factor * 0.5f);
 }
 
-// Get segment definition for index i
 static inline radial_segment_t radial_get_segment(radial_layout_t *layout, i32 i, f32 height) 
 {
     f32 angle_step = radial_angle_step(layout->num_segments, layout->gap_factor);
@@ -1030,62 +1128,20 @@ static inline radial_segment_t radial_get_segment(radial_layout_t *layout, i32 i
     return seg;
 }
 
-// Generate 4 corner vertices for a radial segment (trapezoid)
-typedef struct {
-    f32 x, y;
-} point2d_t;
-
-typedef struct {
-    point2d_t inner1, inner2, outer1, outer2;
-} radial_quad_t;
-
-static inline radial_quad_t radial_segment_to_quad(radial_layout_t *layout, radial_segment_t seg) 
+void catmull_rom_point(f32 t, vertex_t p[4], vertex_t *out)
 {
-    radial_quad_t quad;
+    f32 t2 = t * t;
+    f32 t3 = t2 * t;
     
-    polar_to_cartesian((polar_t){seg.inner_radius, seg.angle_start}, 
-                       layout->center_x, layout->center_y, layout->scale_x, layout->scale_y,
-                       &quad.inner1.x, &quad.inner1.y);
+    // Catmull-Rom basis matrix coefficients
+    f32 c0 = -0.5f * t3 + t2 - 0.5f * t;
+    f32 c1 = 1.5f * t3 - 2.5f * t2 + 1.0f;
+    f32 c2 = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
+    f32 c3 = 0.5f * t3 - 0.5f * t2;
     
-    polar_to_cartesian((polar_t){seg.inner_radius, seg.angle_end}, 
-                       layout->center_x, layout->center_y, layout->scale_x, layout->scale_y,
-                       &quad.inner2.x, &quad.inner2.y);
-    
-    polar_to_cartesian((polar_t){seg.outer_radius, seg.angle_start}, 
-                       layout->center_x, layout->center_y, layout->scale_x, layout->scale_y,
-                       &quad.outer1.x, &quad.outer1.y);
-    
-    polar_to_cartesian((polar_t){seg.outer_radius, seg.angle_end}, 
-                       layout->center_x, layout->center_y, layout->scale_x, layout->scale_y,
-                       &quad.outer2.x, &quad.outer2.y);
-    
-    return quad;
-}
-
-void render_radial_menu(const char **items, int num_items) 
-{
-    radial_layout_t layout = {
-        .center_x = 0.0f, .center_y = 0.0f,
-        .scale_x = 1.0f, .scale_y = 1.0f,
-        .num_segments = num_items,
-        .inner_radius = 0.2f,
-        .outer_radius = 0.5f,
-        .rotation = 0.0f,
-        .gap_factor = 0.1f
-    };
-    
-    for (int i = 0; i < num_items; i++) {
-        radial_segment_t seg = radial_get_segment(&layout, i, 1.0f);
-        // Calculate segment center for text placement
-        f32 mid_angle = (seg.angle_start + seg.angle_end) / 2.0f;
-        f32 mid_radius = (seg.inner_radius + seg.outer_radius) / 2.0f;
-        
-        f32 text_x, text_y;
-        polar_to_cartesian((polar_t){mid_radius, mid_angle}, 
-                          layout.center_x, layout.center_y, 
-                          layout.scale_x, layout.scale_y,
-                          &text_x, &text_y);
-        
-        // Draw segment background + text at (text_x, text_y)
-    }
+    out->x = c0 * p[0].x + c1 * p[1].x + c2 * p[2].x + c3 * p[3].x;
+    out->y = c0 * p[0].y + c1 * p[1].y + c2 * p[2].y + c3 * p[3].y;
+    out->r = c0 * p[0].r + c1 * p[1].r + c2 * p[2].r + c3 * p[3].r;
+    out->g = c0 * p[0].g + c1 * p[1].g + c2 * p[2].g + c3 * p[3].g;
+    out->b = c0 * p[0].b + c1 * p[1].b + c2 * p[2].b + c3 * p[3].b;
 }

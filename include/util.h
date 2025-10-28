@@ -23,19 +23,46 @@
 #include <immintrin.h> 
 
 #define TAB_SIZE                    4
-
 #define DEBUG                       1
 
 #define M_PI                        3.14159265358979323846
 #define M_PI_2                      1.57079632679489661923
 
-#define NUM_ELEMS(x) ((sizeof(x))/(sizeof((x)[0])))
+#define ArrayCount(x) ((sizeof(x))/(sizeof((x)[0])))
+
+#define IntFromPtr(p) (U64)((U8*)p - (U8*)0)
+#define PtrFromInt(n) (void*)((U8*)0 + (n))
+
+#define Member(T,m) (((T*)0)->m)
+#define OffsetOfMember(T,m) IntFromPtr(&Member(T,m))
 
 #define DEBUG_PRT(fmt, ...)\
     do{\
         if(DEBUG)\
             fprintf(stderr, "%s:%d:%s(): " fmt, __FILE__, __LINE__, __func__ __VA_OPT__(,) __VA_ARGS__);\
     }while(0)
+
+#define Stringify_(S) #S
+#define Stringify(S) Stringify_(S)
+#define Glue_(A,B) A##B
+#define Glue(A,B) Glue_(A,B)
+
+#define ENUM_GEN(ENUM)     ENUM,
+#define STRING_GEN(STRING) #STRING,
+
+/* 
+// Add enum list here 
+#define FOREACH_ENUM(ENUM) \
+    ENUM(ENUM_COUNT) 
+
+typedef enum ENUM_T {
+    FOREACH_ENUM(ENUM_GEN)
+}ENUM_T;
+
+const char* enum_strings[] = {
+    FOREACH_ENUM(STRING_GEN)
+}; 
+*/
 
 #define FOREACH(item, array)                                 \
     for (int _keep = 1,                                      \
@@ -60,13 +87,17 @@
         (y) = tmp;    \
     } while (0)
 
-#define EPSILON_F32  (1e-6f)
-#define EPSILON_F64  (1e-12)
+#define EPSILON_F32                     (1e-6f)
+#define EPSILON_F64                     (1e-12)
 #define COMPARE_FLOATS(a,b,epsilon)     (fabs(a - b) <= epsilon * fabs(a))
 
 #define MASK(w,m,f)                     (w ^= (-f ^ w) & m)            // Conditionally set or clear bits  if (f) is true ->  w |= m; else w &= ~m;
 #define SIGN(v)                         ((v) > 0) - ((v) < 0)
 #define ABS(v)                          ((v < 0) ? -(unsigned)v : v)
+
+#define NEG(v,f)                        ((v ^ -f) + f)
+
+#define TOGGLE(B)                       ((B)^=1)
 
 #define KB(n)                           (((u64)(n)) << 10)
 #define MB(n)                           (((u64)(n)) << 20)
@@ -82,17 +113,17 @@
 #define MAX3(a,b,c)                     ((a) > (b) ? ((a) > (c) ? (a) : (c)) : ((b) > (c) ? (b) : (c)))
 #define MIN3(a,b,c)                     ((a) < (b) ? ((a) < (c) ? (a) : (c)) : ((b) < (c) ? (b) : (c)))
 
-#define MAX_F32(a, b)  ((COMPARE_FLOATS((a), (b), EPSILON_F32) || (a) > (b)) ? (a) : (b))
-#define MIN_F32(a, b)  ((COMPARE_FLOATS((a), (b), EPSILON_F32) || (a) < (b)) ? (a) : (b))
+#define MAX_F32(a, b)                   ((COMPARE_FLOATS((a), (b), EPSILON_F32) || (a) > (b)) ? (a) : (b))
+#define MIN_F32(a, b)                   ((COMPARE_FLOATS((a), (b), EPSILON_F32) || (a) < (b)) ? (a) : (b))
 
-#define MAX_F64(a, b)  ((COMPARE_FLOATS((a), (b), EPSILON_F64) || (a) > (b)) ? (a) : (b))
-#define MIN_F64(a, b)  ((COMPARE_FLOATS((a), (b), EPSILON_F64) || (a) < (b)) ? (a) : (b))
+#define MAX_F64(a, b)                   ((COMPARE_FLOATS((a), (b), EPSILON_F64) || (a) > (b)) ? (a) : (b))
+#define MIN_F64(a, b)                   ((COMPARE_FLOATS((a), (b), EPSILON_F64) || (a) < (b)) ? (a) : (b))
 
-#define MAX3_F32(a, b, c)  (MAX_F32(MAX_F32((a), (b)), (c)))
-#define MIN3_F32(a, b, c)  (MIN_F32(MIN_F32((a), (b)), (c)))
+#define MAX3_F32(a, b, c)               (MAX_F32(MAX_F32((a), (b)), (c)))
+#define MIN3_F32(a, b, c)               (MIN_F32(MIN_F32((a), (b)), (c)))
 
-#define MAX3_F64(a, b, c)  (MAX_F64(MAX_F64((a), (b)), (c)))
-#define MIN3_F64(a, b, c)  (MIN_F64(MIN_F64((a), (b)), (c)))
+#define MAX3_F64(a, b, c)               (MAX_F64(MAX_F64((a), (b)), (c)))
+#define MIN3_F64(a, b, c)               (MIN_F64(MIN_F64((a), (b)), (c)))
 
 #define CEIL_DIV(x, y)                  (((x) + (y) - 1) / (y))
 #define ALIGN_UP(x, y)                  ((((x) + (y) - 1) / (y)) * (y))
@@ -102,15 +133,15 @@
 #define RANGE_CONVERT(value, from_min, from_max, to_min, to_max) \
     (((value) - (from_min)) * ((to_max) - (to_min)) / ((from_max) - (from_min)) + (to_min))
 
-#define NORMALIZE(val, min, max) (((val) - (min)) / ((max) - (min)))
+#define NORMALIZE(val, min, max)        (((val) - (min)) / ((max) - (min)))
 
-#define WRAP_INDEX(pos, size)   (((pos) + (size)) % (size))
-#define INC_WRAP(pos, size)     (((pos) + (1)) % (size))
+#define WRAP_INDEX(pos, size)           (((pos) + (size)) % (size))
+#define INC_WRAP(pos, size)             (((pos) + (1)) % (size))
 
-#define FRAND_MAX                 32767  
+#define FRAND_MAX                       32767  
 
-#define RAND_FLOAT()                (f32)fast_rand() / ((f32)FRAND_MAX + 1.0f)
-#define RAND_FLOAT_RANGE(min,max)   (min + (max-min) * (RAND_FLOAT()))
+#define RAND_FLOAT()                    (f32)fast_rand() / ((f32)FRAND_MAX + 1.0f)
+#define RAND_FLOAT_RANGE(min,max)       (min + (max-min) * (RAND_FLOAT()))
 
 /*
     - start = starting value
@@ -119,6 +150,12 @@
  */
 #define LERP_F32(start, end, t)     ((f32)((start) + ((end) - (start)) * (t)))
 #define LERP_F64(start, end, t)     ((f64)((start) + ((end) - (start)) * (t)))
+
+/*
+    value = LERP(a, b, t)
+    t = INVERSE_LERP(a, b, value) 
+*/
+#define INVERSE_LERP(a, b, value)   (((value) - (a)) / ((b) - (a)))
 
 #define ClampTop(A,X)               MIN(A,X)
 #define ClampBot(X,B)               MAX(X,B)
@@ -243,37 +280,22 @@ global_variable i32 min_i32 = (i32)0x80000000;
 global_variable i16 min_i16 = (i16)0x8000;
 global_variable i8  min_i8  =  (i8)0x80;
 
-typedef struct color4_t
-{
-    u8 r;
-    u8 g;
-    u8 b;
-    u8 a;
-}color4_t;
-
 typedef struct vec2_t{
-    u32 x;
-    u32 y;
+    i32 x,y;
 }vec2_t;
 
 typedef struct vec2f_t{
-    f32 x;
-    f32 y;
+    f32 x, y;
 }vec2f_t;
 
 typedef struct vec3f_t
 {
-    f32 x;
-    f32 y;
-    f32 z;
+    f32 x, y, z;
 }vec3f_t;
 
 typedef struct vec4f_t
 {
-    f32 x;
-    f32 y;
-    f32 z;
-    f32 w;    
+    f32 x, y, z, w;    
 }vec4f_t;
 
 typedef struct mat4x4_t
@@ -283,17 +305,53 @@ typedef struct mat4x4_t
 
 typedef struct rect_t
 {
-    i32 x;
-    i32 y;
-    i32 w;
-    i32 h;
+    i32 x, y, w, h;
 }rect_t;
 
-void  log_error(int error_code, const char* file, int line);
-void *check_ptr (void *ptr, const char* file, int line);
-void swap(int* a, int* b);
-void fast_srand(int seed);
-int fast_rand(void);
+typedef enum {
+    EASE_LINEAR,
+    EASE_IN_QUAD,
+    EASE_OUT_QUAD,
+    EASE_IN_OUT_QUAD,
+    EASE_IN_CUBIC,
+    EASE_OUT_CUBIC,
+    EASE_IN_OUT_CUBIC,
+    EASE_IN_SINE,
+    EASE_OUT_SINE,
+    EASE_IN_OUT_SINE,
+    EASE_OUT_BOUNCE
+}easing_type;
+
+typedef struct {
+    u64         id;
+    f32         start;
+    f32         current;
+    f32         target;
+    f64         duration;
+    f64         elapsed;
+    easing_type easing;
+    bool        done;
+}animation_t;
+
+#define ANIMATION_MAX_ITEMS 32
+
+extern animation_t animation_items[ANIMATION_MAX_ITEMS];
+extern i32 animation_item_count;
+
+void print_spaces(const char* message, i32 spaces);
+void log_color(char *text, char c);
+void log_error(i32 error_code, const char* file, i32 line);
+void *check_ptr (void *ptr, const char* file, i32 line);
+void dump_memory(void *ptr, i32 size);
+void fast_srand(u32 seed);
+i32 fast_rand(void);
+u32 hash(u32 x);
+u32 unhash(u32 x);
+u32 djb2_hash(const char *str);
+u32 fnv1a_hash(const char *str);
+u64 arith_mod(u64 x, u64 y);
+f32 d_sqrt(f32 number);
+f32 smoothstep(f32 edge0, f32 edge1, f32 x); 
 
 vec2f_t vec2f(float x, float y);
 vec2f_t vec2f_add(vec2f_t a, vec2f_t b);
@@ -333,12 +391,20 @@ mat4x4_t mat_rotate_xy(f32 angle);
 mat4x4_t mat_rotate_yz(f32 angle);
 mat4x4_t mat_rotate_zx(f32 angle);
 
+f64 apply_easing(f64 t, easing_type easing);
+void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type easing);
+void animation_update(f64 dt);
+bool animation_get(u64 id, f32 *current);
+void animation_pingpong(u64 id, f32 start, f32 target, f32 duration, easing_type easing);
+
 f64 get_time_difference(void *last_time);
 void get_time(void *time);
 
 thread_handle_t create_thread(thread_func_t func, thread_func_param_t data);
 void join_thread(thread_handle_t thread);
 int get_core_count(void);
+
+const char* get_file_extension(const char *filepath);
 
 #define LOG_ERROR(error_code)   log_error(error_code, __FILE__, __LINE__)
 #define CHECK_PTR(ptr)          check_ptr(ptr, __FILE__, __LINE__)

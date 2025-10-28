@@ -1,3 +1,8 @@
+#ifdef _WIN32
+        __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;           // Optimus: force switch to discrete GPU
+        __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;     // AMD
+#endif
+
 typedef struct 
 {
     f32 x, y;     

@@ -1,6 +1,50 @@
 #include "../include/util.h"
 
-void log_error(int error_code, const char* file, int line)
+void print_spaces(const char* message, int spaces)
+{
+    printf("%-*s ",spaces,message);
+}
+
+void log_color(char *text, char c)
+{
+    switch (c)
+    {
+        case 'r':
+        {
+            printf("\033[1;31m");
+        }
+        break;
+        case 'y':
+        {
+            printf("\033[1;33m");
+        }
+        break;
+        case 'b':
+        {
+            printf("\033[0;34m");
+        }
+        break;
+        case 'p':
+        {
+            printf("\033[0;35m");
+        }
+        break;
+        case 'g':
+        {
+            printf("\033[0;32m");
+        }
+        break;
+        default:
+        {
+            printf("\033[0m");
+        }
+        break;
+    }
+    printf("%s\n", text);
+    printf("\033[0m");
+}
+
+void log_error(i32 error_code, const char* file, i32 line)
 {
     if (error_code != 0){
         fprintf(stderr,"Error %d, In file: %s, Line : %d \n",error_code, file, line);
@@ -8,7 +52,7 @@ void log_error(int error_code, const char* file, int line)
     }
 }
 
-void* check_ptr(void *ptr, const char* file, int line)
+void* check_ptr(void *ptr, const char* file, i32 line)
 {
     if(ptr == NULL){
         fprintf(stderr, "In file: %s, Line : %d \n", file, line);
@@ -17,11 +61,42 @@ void* check_ptr(void *ptr, const char* file, int line)
     return ptr;
 }
 
-void swap(int* a, int* b) 
+void dump_memory(void *ptr, i32 size)
 {
-    int temp = *a;
-    *a = *b;
-    *b = temp;
+    int i;
+    byte *byte_ptr = (byte *)ptr;
+    printf("\n");
+    print_spaces("Address",20);
+    print_spaces("Bytes",18);
+    print_spaces("Characters",10);
+    printf("\n");
+    print_spaces("--------",8);
+    print_spaces("-----------------------------",30);
+    print_spaces("----------",10);
+    printf("\n");
+    while(size > 0)
+    {
+        printf("%8X ", (u32)byte_ptr);
+        for (i = 0; i < 10 && i < size; i++){
+            printf("%.2X ", *(byte_ptr + i));
+        }
+        /* Compensate for size less than 10 bytes */
+        for (; i < 10; i++){
+            printf("   ");
+        }
+        printf(" ");
+        for (i = 0; i < 10 && i < size; i++)
+        {
+            byte ch = *(byte_ptr + i);
+            if (!isprint(ch))
+                ch = '.';
+            printf("%c", ch);
+        }
+        printf("\n");
+        byte_ptr += 10;
+        size -= 10;
+    }
+    return;
 }
 
 __declspec(thread) u32 g_seed;
@@ -32,13 +107,79 @@ void fast_srand(u32 seed)
 }
 
 // Output value in range [0, 32767]
-int fast_rand(void) 
+i32 fast_rand(void) 
 {
     g_seed = (214013*g_seed+2531011);
     return (g_seed>>16)&0x7FFF;
 }
 
-vec2f_t vec2f(float x, float y)
+u32 hash(u32 x)
+{
+    x = ((x >> 16) ^ x) * 0x45d9f3b;
+    x = ((x >> 16) ^ x) * 0x45d9f3b;
+    x = (x >> 16) ^ x;
+    return x;
+}
+
+u32 unhash(u32 x)
+{
+    x = ((x >> 16) ^ x) * 0x119de1f3;
+    x = ((x >> 16) ^ x) * 0x119de1f3;
+    x = (x >> 16) ^ x;
+    return x;
+}
+
+u32 djb2_hash(const char *str) 
+{
+    u64 hash = 5381;
+    for (; *str != '\0'; str++) {
+        byte c = *str;
+        hash = ((hash << 5) + hash) ^ c;
+    }
+    return hash;
+}
+
+u32 fnv1a_hash(const char *str) 
+{
+    uint32_t hash = 2166136261u;
+    while (*str) {
+        hash ^= (uint8_t)*str++;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+u64 arith_mod(u64 x, u64 y) 
+{
+    if (-13 / 5 == -2 &&        // Check division truncates to zero
+        (x < 0) != (y < 0) &&   // Check x and y have different signs
+        (x % y) != 0)
+        return x % y + y;
+    else
+        return x % y;
+}
+
+f32 d_sqrt(f32 number)
+{
+    i32 i;
+    f32 x, y;
+    x = number * 0.5;
+    y  = number;
+    i  = * (i32 * ) &y;
+    i  = 0x5f3759df - (i >> 1);
+    y  = * ( f32 * ) &i;
+    y  = y * (1.5 - (x * y * y));
+    y  = y * (1.5 - (x * y * y));
+    return number * y;
+}
+
+static inline f32 smoothstep(f32 edge0, f32 edge1, f32 x) 
+{
+    f32 t = Clamp(0.0f, (x - edge0) / (edge1 - edge0), 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+vec2f_t vec2f(f32 x, f32 y)
 {
     vec2f_t vec2 = {
         .x = x,
@@ -78,7 +219,6 @@ vec2f_t vec2f_div(vec2f_t a, vec2f_t b)
     vec2.y = a.y / b.y;
     return vec2;
 }
-
 
 vec3f_t vec3f_add(vec3f_t a, vec3f_t b) 
 {
@@ -512,6 +652,161 @@ float cosine(int x){
     return sine(90-x);
 }
 
+animation_t animation_items[ANIMATION_MAX_ITEMS];
+i32 animation_item_count;
+
+/* https://easings.net/ */
+f64 apply_easing(f64 t, easing_type easing) 
+{
+    switch (easing) 
+    {
+        case EASE_LINEAR:
+            return t;
+            
+        case EASE_IN_QUAD:
+            return t * t;
+            
+        case EASE_OUT_QUAD:
+            return t * (2.0 - t);
+            
+        case EASE_IN_OUT_QUAD:
+            if (t < 0.5) return 2.0 * t * t;
+            return -1.0 + (4.0 - 2.0 * t) * t;
+            
+        case EASE_IN_CUBIC:
+            return t * t * t;
+            
+        case EASE_OUT_CUBIC:
+            return (--t) * t * t + 1.0;
+            
+        case EASE_IN_OUT_CUBIC:
+            if (t < 0.5) return 4.0 * t * t * t;
+            return (t - 1.0) * (2.0 * t - 2.0) * (2.0 * t - 2.0) + 1.0;
+            
+        case EASE_IN_SINE:
+            return 1.0 - (f64)cosf(t * M_PI_2);
+            
+        case EASE_OUT_SINE:
+            return (f64)sinf(t * M_PI_2);
+            
+        case EASE_IN_OUT_SINE:
+            return -0.5 * ((f64)cosf(M_PI * t) - 1.0);
+
+        case EASE_OUT_BOUNCE:
+            const f64 n1 = 7.5625;
+            const f64 d1 = 2.75;
+
+            if (t < 1.0 / d1) {
+                return n1 * t * t;
+            } else if (t < 2.0 / d1) {
+                return n1 * (t -= 1.5 / d1) * t + 0.75;
+            } else if (t < 2.5 / d1) {
+                return n1 * (t -= 2.25 / d1) * t + 0.9375;
+            } else {
+                return n1 * (t -= 2.625 / d1) * t + 0.984375;
+            }
+        default:
+            return t;
+    }
+}
+
+void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type easing) 
+{
+    for (i32 i = 0; i < animation_item_count; i++) 
+    {
+        animation_t *it = &animation_items[i];
+        if (it->id == id) {
+            // it->elapsed = 0;      
+            it->start = it->current;
+            it->target = target;
+            it->elapsed = 0;
+            it->duration = duration;
+            return;
+        }
+    }
+
+    // push new item if we have room
+    if (animation_item_count < ANIMATION_MAX_ITEMS) 
+    {
+        animation_items[animation_item_count++] = (animation_t){
+            .id = id,
+            .start = start,
+            .target = target,
+            .easing = easing,
+            .duration = duration,
+            .elapsed = 0,
+            .done = false
+        };
+    }
+}
+
+void animation_update(f64 dt) 
+{
+    for(i32 i = animation_item_count-1; i>=0; i--)
+    {
+        animation_t *anim = &animation_items[i];
+        
+        anim->elapsed += dt;
+        
+        if (anim->elapsed >= anim->duration) 
+        {
+            anim->done = true;
+            // clamp it to target
+            anim->current = anim->target;
+            // remove it from the list when done
+            // just replace it with the last item and decrement the count
+            *anim = animation_items[--animation_item_count];
+            continue;
+        }
+        
+        // progress in animation
+        f64 t = anim->elapsed / anim->duration;
+        f64 eased_t = apply_easing(t, anim->easing);
+        
+        anim->current = LERP_F32(anim->start, anim->target, eased_t);
+    }
+}
+
+bool animation_get(u64 id, f32 *current)
+{
+    for (i32 i = 0; i < animation_item_count; i++) 
+    {
+        animation_t *it = &animation_items[i];
+
+        if (it->id == id) {
+            *current = it->current;
+            return true;
+        }
+    }
+    return false;
+}
+
+void animation_pingpong(u64 id, f32 start, f32 target, f32 duration, easing_type easing)
+{
+    static bool reached_top = false;
+    static bool reached_bottom = false;
+
+    f32 begin = MIN(start, target);
+    f32 end = MAX(start, target);
+
+    f32 current = 0;
+
+    animation_get(id, &current);
+
+    if(current >= end-EPSILON_F32 && !reached_top)
+    {
+        animation_start((u64)&current, end, begin, duration, easing);
+        reached_bottom = false;
+        reached_top = true;
+    }
+    else if(current <= begin+EPSILON_F32 && !reached_bottom)
+    {
+        animation_start((u64)&current ,begin, end, duration, easing);
+        reached_top = false;
+        reached_bottom = true;
+    }
+}
+
 f64 get_time_difference(void *last_time) 
 {
     f64 dt = 0.0;
@@ -583,3 +878,11 @@ int get_core_count(void)
     #endif
 }
 
+const char* get_file_extension(const char *filepath)
+{
+    const char* dot = strrchr(filepath, '.');
+    if(!dot){
+        return NULL;
+    }
+    return dot+1;
+}

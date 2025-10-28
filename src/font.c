@@ -192,7 +192,7 @@ void render_glyph_to_buffer_tt_scissored(font_tt *font, u32 codepoint,
                 if (alpha > 0) 
                 {
                     color.a = alpha;
-                    draw_pixel(color_buf, x, y, color);
+                    set_pixel_scissored(color_buf, x, y, color);
                 }
             }
         }

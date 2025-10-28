@@ -45,7 +45,7 @@ extern todo_list *main_list;
 extern todo_filter *main_filter;
 
 void todo_list_new(const char *name);
-void todo_list_add(todo_list *list, todo_item item);
+void todo_list_add(todo_list *list, todo_item *item);
 void todo_item_add_tag(todo_item *item, char *tag);
 void todo_item_add_content(todo_item *item, char *content);
 void todo_item_add_note(todo_item *item, char *note);

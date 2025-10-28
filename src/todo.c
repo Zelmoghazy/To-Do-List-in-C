@@ -8,15 +8,17 @@ void todo_list_new(const char *name)
     todo_list new_list = {0};
     strncpy(new_list.name, name, MAX_LIST_NAME_SIZE-1);
     new_list.todo_items = NULL;
+    arrsetcap(new_list.todo_items, 100);
     arrput(main_list, new_list);
 }
 
-void todo_list_add(todo_list *list, todo_item item)
+void todo_list_add(todo_list *list, todo_item *item)
 {
-    item.created = time(NULL);
-    item.completed = false;
-    item.tags = NULL;
-    arrput(list->todo_items, item);
+    todo_item new_item = *item;
+    new_item.created = time(NULL);
+    new_item.completed = false;
+    new_item.tags = NULL;
+    arrput(list->todo_items, new_item);
 }
 
 void todo_item_add_tag(todo_item *item, char *tag)
