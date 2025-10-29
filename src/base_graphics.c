@@ -335,56 +335,108 @@ void draw_line(image_view_t const *color_buf, i32 x0, i32 y0, i32 x1, i32 y1, co
 
 void draw_aaline(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, color4_t color) 
 {
-    i32 dx = abs(x2 - x1);
-    i32 dy = abs(y2 - y1);
+    i32 xx0, yy0, xx1, yy1;
+    u32 erracc, erradj;
+    u32 erracctmp, wgt;
+    i32 dx, dy, tmp, xdir;
+    
+    // Handle special cases
+    dx = x2 - x1;
+    dy = y2 - y1;
     
     if (dx == 0) {
         draw_vline(img, x1, y1, y2, color);
         return;
     }
     if (dy == 0) {
-        draw_hline(img, y1, x1, x2,color);
+        draw_hline(img, y1, x1, x2, color);
         return;
     }
     
-    i32 sx = (x1 < x2) ? 1 : -1;
-    i32 sy = (y1 < y2) ? 1 : -1;
+    xx0 = x1;
+    yy0 = y1;
+    xx1 = x2;
+    yy1 = y2;
     
-    if (dy > dx) 
-    {
-        // Steep line
-        i32 gradient = (dx << 16) / dy;
-        i32 xend = x1 << 16;
+    // Reorder points so yy0 < yy1
+    if (yy0 > yy1) {
+        tmp = yy0;
+        yy0 = yy1;
+        yy1 = tmp;
+        tmp = xx0;
+        xx0 = xx1;
+        xx1 = tmp;
+    }
+    
+    // Recalculate distance
+    dx = xx1 - xx0;
+    dy = yy1 - yy0;
+    
+    // Adjust for negative dx and set xdir
+    if (dx >= 0) {
+        xdir = 1;
+    } else {
+        xdir = -1;
+        dx = -dx;
+    }
+    
+    // Zero accumulator
+    erracc = 0;
+    
+    // Draw the initial pixel
+    set_pixel_blend(img, x1, y1, color);
+    
+    // x-major or y-major?
+    if (dy > dx) {
+        // y-major: Calculate fixed point fractional part
+        // erradj represents how much X advances for each Y step
+        erradj = ((dx << 16) / dy) << 16;
         
-        for (i32 y = y1; y != y2; y += sy) {
-            i32 x = xend >> 16;
-            u8 alpha1 = 255 - ((xend & 0xFFFF) >> 8);
-            u8 alpha2 = (xend & 0xFFFF) >> 8;
+        i32 x0pxdir = xx0 + xdir;
+        
+        // Draw all pixels other than the first and last
+        while (--dy) {
+            erracctmp = erracc;
+            erracc += erradj;
             
-            set_pixel_weighted(img, x, y, color, alpha1);
-            set_pixel_weighted(img, x + sx, y, color, alpha2);
+            if (erracc <= erracctmp) {
+                // Rollover in error accumulator, x coord advances
+                xx0 = x0pxdir;
+                x0pxdir += xdir;
+            }
+            yy0++; // y-major so always advance Y
             
-            xend += gradient * sy;
+            // Extract intensity weighting from upper bits
+            wgt = (erracc >> 24) & 255;
+            set_pixel_weighted(img, xx0, yy0, color, 255 - wgt);
+            set_pixel_weighted(img, x0pxdir, yy0, color, wgt);
         }
-    } 
-    else
-    {
-        // Shallow line
-        i32 gradient = (dy << 16) / dx;
-        i32 yend = y1 << 16;
+    } else {
+        // x-major: Calculate fixed point fractional part
+        // erradj represents how much Y advances for each X step
+        erradj = ((dy << 16) / dx) << 16;
         
-        for (i32 x = x1; x != x2; x += sx) 
-        {
-            i32 y = yend >> 16;
-            u8 alpha1 = 255 - ((yend & 0xFFFF) >> 8);
-            u8 alpha2 = (yend & 0xFFFF) >> 8;
+        i32 y0p1 = yy0 + 1;
+        
+        // Draw all pixels other than the first and last
+        while (--dx) {
+            erracctmp = erracc;
+            erracc += erradj;
             
-            set_pixel_weighted(img, x, y, color, alpha1);
-            set_pixel_weighted(img, x, y + sy, color, alpha2);
+            if (erracc <= erracctmp) {
+                // Accumulator turned over, advance y
+                yy0 = y0p1;
+                y0p1++;
+            }
+            xx0 += xdir; // x-major so always advance X
             
-            yend += gradient * sx;
+            // Extract intensity weighting from upper bits
+            wgt = (erracc >> 24) & 255;
+            set_pixel_weighted(img, xx0, yy0, color, 255 - wgt);
+            set_pixel_weighted(img, xx0, y0p1, color, wgt);
         }
     }
+    
     set_pixel_blend(img, x2, y2, color);
 }
 

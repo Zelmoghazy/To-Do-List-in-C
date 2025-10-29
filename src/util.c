@@ -1,4 +1,5 @@
 #include "../include/util.h"
+#include "GLFW/glfw3.h"
 
 void print_spaces(const char* message, int spaces)
 {
