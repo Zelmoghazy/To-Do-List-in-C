@@ -168,11 +168,12 @@ typedef struct ui_context_t
 {
     ui_block_t *root_block;
     ui_block_t *active_block;          
-    ui_block_t *blocks[MAX_BLOCKS];
+
+    ui_block_t **blocks;
     i32 block_count;
 
     // flatten the post order
-    ui_block_t *layout_order[MAX_BLOCKS];
+    ui_block_t **layout_order;
     i32 layout_count;
 
     u32 hot_block_id;
@@ -552,6 +553,17 @@ void char_callback(GLFWwindow* window, unsigned int codepoint)
 void poll_events(void)
 {
     glfwPollEvents();
+    // glfwWaitEvents(); // find a way to make it work with animations
+    // glfwWaitEventsTimeout(0.016);
+}
+
+void ui_new_frame(ui_context_t *ctx)
+{
+    ctx->blocks = ARENA_ALLOC_ZEROED(gc.frame_arena, MAX_BLOCKS, sizeof(ui_block_t*));
+    ctx->block_count = 0;
+
+    ctx->layout_order = ARENA_ALLOC_ZEROED(gc.frame_arena, MAX_BLOCKS, sizeof(ui_block_t*));
+    ctx->layout_count = 0;
 }
 
 /* Create a block with defaults */
@@ -560,8 +572,17 @@ ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width
     if (ctx->block_count >= MAX_BLOCKS){
         return NULL;
     } 
-
+    
     ui_block_t *block = ARENA_ALLOC_ZEROED(gc.frame_arena, 1, sizeof(ui_block_t));
+    
+    block->id = djb2_hash(title);
+    
+    // check for duplicates
+    for (i32 i = 0; i < ctx->block_count; i++){
+        if (ctx->blocks[i]->id == block->id){
+            return NULL;
+        }
+    }
 
     block->enabled = true;
     block->visible = true;
@@ -593,7 +614,6 @@ ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width
     block->text.string = block->title;
     block->text.color = HEX_TO_COLOR4(0xf8f8f2);
 
-    block->id = djb2_hash(title);
     ctx->blocks[ctx->block_count++] = block;
 
     ui_block_load_state(block);
@@ -660,7 +680,9 @@ void ui_set_block_content_size(ui_block_t *block, i32 content_width, i32 content
 void ui_block_to_screen_coords(ui_block_t *block, i32 block_x, i32 block_y, i32 *screen_x, i32 *screen_y)
 {
     if(!block)
+    {
         return;
+    }
     
     // offset the scroll 
     *screen_x = block_x - block->scroll_x;
@@ -773,7 +795,6 @@ void ui_render_text_in_block(ui_block_t *block)
     render_text_tt_scissored(&gc.draw_buffer, &block->text);
 }
 
-
 void ui_draw_block_background(ui_block_t *block)
 {
     if (!block->visible)
@@ -859,10 +880,13 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
     {
         ctx->hot_block_id = target->id;
 
-        target->hover = true;
-
-        if(!animation_get(target->id, &target->hot_anim_t))
-            animation_start((u64)target->id, 0.0f, 1.0f,0.3f, EASE_IN_OUT_CUBIC);
+        if(!target->hover)
+        {
+            target->hover = true;
+            if(!animation_get(target->id, &target->hot_anim_t)){
+                animation_start((u64)target->id, 0.0f, 1.0f, 0.5f, EASE_IN_OUT_CUBIC);
+            }
+        }
 
         if(target->dragging)
         {
@@ -871,8 +895,7 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
         }
 
         // do custom update if required
-        if(target->custom_update)
-        {
+        if(target->custom_update){
             target->custom_update(target);
         }
 
@@ -1201,8 +1224,6 @@ void ui_layout(ui_context_t *ctx)
         ui_block_t *block = ctx->layout_order[i];
         ui_block_layout(ctx, block);  // modified version
     }
-
-    ctx->layout_count = 0;
 }
 
 void ui_render(ui_context_t *ctx)
@@ -2070,9 +2091,8 @@ text_edit_state_t *ui_text_edit(ui_context_t *ctx, char *title, char *initial_te
 }
 
 
-void ui_reset_ctx(ui_context_t *ctx)
+void ui_end_frame(ui_context_t *ctx)
 {
-    ctx->block_count = 0;
 }
 
 ui_context_t* ui_new_ctx(void)
@@ -2305,6 +2325,7 @@ void render_all(void)
         clear_screen(&gc.draw_buffer, HEX_TO_COLOR4(0x282a36));
         // clear_screen_radial_gradient(&gc.draw_buffer, HEX_TO_COLOR4(0x6272a4),HEX_TO_COLOR4(0x282a36));
     }
+    ui_new_frame(gc.ui_ctx);
 
 /*     PROFILE("Building and rendering the ui")
     {
@@ -2354,7 +2375,9 @@ void render_all(void)
 
     PROFILE("Building and rendering the ui")
     {
-        ui_begin_panel(gc.ui_ctx, "Root", 0, 0, 800, 600, VERTICAL_LAYOUT);
+        text_edit_state_t *text_state = NULL;
+
+        ui_begin_panel(gc.ui_ctx, "Root", gc.side_panel_x, 0, gc.screen_width-gc.side_panel_x, gc.screen_height, VERTICAL_LAYOUT);
             ui_begin_panel(gc.ui_ctx, "Test1", 0, 0, 0, 100, HORIZONTAL_LAYOUT);
                 ui_begin_panel(gc.ui_ctx, "Test1-1", 0, 0, 100, 0, VERTICAL_LAYOUT);
                 ui_end_panel(gc.ui_ctx);
@@ -2375,8 +2398,8 @@ void render_all(void)
             
             ui_begin_panel(gc.ui_ctx, "Test3", 0, 0, 0, 300, VERTICAL_LAYOUT);
                 ui_slider(gc.ui_ctx,0.0f, 100.0f,"Slider");
+            text_state = ui_text_edit(gc.ui_ctx, "TextEdit1", "Add your task ..");
             ui_end_panel(gc.ui_ctx);
-
         ui_end_panel(gc.ui_ctx);
 
         ui_layout(gc.ui_ctx);
@@ -2403,6 +2426,16 @@ void render_all(void)
         if(gc.profile)
         {
             render_prof_entries();
+        }
+
+        for(i32 i = gc.ui_ctx->block_count-1 ; i > 0; i--)
+        {
+            if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->hot_block_id)
+            {
+                i32 screen_x, screen_y;
+                ui_block_to_screen_coords(gc.ui_ctx->blocks[i], gc.ui_ctx->blocks[i]->x, gc.ui_ctx->blocks[i]->y, &screen_x, &screen_y);
+                draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_GREEN:COLOR_RED);
+            }
         }
 
         render_mouse_stuff();
@@ -2444,7 +2477,7 @@ void cleanup_all()
 {
     arena_reset(gc.frame_arena);
 
-    ui_reset_ctx(gc.ui_ctx);
+    ui_end_frame(gc.ui_ctx);
 
     prof_sort_results();
     prof_record_results();
@@ -2452,14 +2485,14 @@ void cleanup_all()
     prof_reset();
 }
 
-void init_framebuffer(void)
+void init_framebuffer(i32 max_width, i32 max_height)
 {
     glGenTextures(1, &gc.texture);
     glBindTexture(GL_TEXTURE_2D, gc.texture);
 
     // Generate a full screen texture
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 
-                 (int)1920, (int)1080,
+                 max_width, max_height,
                  0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 
     glGenFramebuffers(1, &gc.read_fbo);
@@ -2515,6 +2548,17 @@ void *create_window(u32 width, u32 height, char *title)
     return window;
 }
 
+void init_time()
+{
+    get_time(&gc.last_frame_start);
+
+    for (i32 i = 0; i < FRAME_HISTORY_SIZE; i++) {
+        gc.frame_history[i] = 1.0 / 60.0; 
+    }
+    gc.frame_idx = 0;
+    gc.current_fps = 60.0;
+}
+
 bool init_all(void)
 {
     gc.screen_width = 1100;
@@ -2531,7 +2575,7 @@ bool init_all(void)
     (void)ARENA_ALLOC(gc.frame_arena, MB(10));
     arena_reset(gc.frame_arena);
 
-    init_framebuffer();
+    init_framebuffer(1920, 1080);
 
     gc.font = load_font_from_file("..\\Font\\Lato.ttf", 32.0f);
     gc.icon_font = load_font_from_file("..\\Font\\Icons.ttf", 32.0f);
@@ -2540,7 +2584,7 @@ bool init_all(void)
     {
         return false;
     }
-
+    
     gc.ui_ctx = ui_new_ctx();
     
     gc.side_panel_x = 500;
@@ -2560,14 +2604,7 @@ bool init_all(void)
     gc.profile     = false;
     gc.changed     = true;
 
-
-    get_time(&gc.last_frame_start);
-
-    for (int i = 0; i < FRAME_HISTORY_SIZE; i++) {
-        gc.frame_history[i] = 1.0 / 60.0; 
-    }
-    gc.frame_idx = 0;
-    gc.current_fps = 60.0;
+    init_time();
 
     gc.hand_cursor = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
     gc.regular_cursor = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
