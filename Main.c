@@ -169,6 +169,9 @@ typedef struct ui_context_t
     ui_block_t *root_block;
     ui_block_t *active_block;          
 
+    ui_block_t *modal_block;
+    u32 modal_active;
+
     ui_block_t **blocks;
     i32 block_count;
 
@@ -178,6 +181,7 @@ typedef struct ui_context_t
 
     u32 hot_block_id;
     u32 active_block_id;
+
 } ui_context_t;
 
 #define TEXT_BUFFER_MAX 512
@@ -296,6 +300,8 @@ void ui_block_save_state(ui_block_t *block);
 void ui_update_block_interaction(ui_block_t *block);
 void ui_render_block(ui_block_t *block);
 void reset_block_interaction(ui_block_t *block);
+void ui_render_modal(ui_context_t *ctx);
+
 
 void set_dark_mode(GLFWwindow *window)
 {
@@ -876,6 +882,14 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
 {
     ui_block_t *target = ui_block_at_point(ctx, (i32)gc.mouse_x, (i32)gc.mouse_y);
 
+    // block interaction not inside the modal block when active
+    if (ctx->modal_active && ctx->modal_block) 
+    {
+        if (!ui_point_in_block(ctx->modal_block, (i32)gc.mouse_x, (i32)gc.mouse_y)) {
+            return;
+        }
+    }
+        
     if(target)
     {
         ctx->hot_block_id = target->id;
@@ -1235,6 +1249,9 @@ void ui_render(ui_context_t *ctx)
             ui_render_block(ctx->blocks[i]);
         }
     }
+    // always rendered last
+    ui_render_modal(ctx);
+
 }
 
 void ui_end_panel(ui_context_t *ctx)
@@ -1596,6 +1613,39 @@ f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
     return slider->value;
 }
 
+void ui_begin_modal(ui_context_t *ctx, char *title, i32 width, i32 height)
+{
+    i32 x = (gc.screen_width - width) / 2;
+    i32 y = (gc.screen_height - height) / 2;
+    
+    ui_block_t *modal = ui_new_block(ctx, title, x, y, width, height, VERTICAL_LAYOUT);
+    
+    modal->is_leaf = false;
+    modal->scrollable = false;
+    
+    // Make it visually distinct
+    modal->bg_color = HEX_TO_COLOR4(0x2e3440);
+    modal->border_width = 2;
+    modal->border_color = HEX_TO_COLOR4(0x88c0d0);
+    
+    ctx->modal_block  = modal;
+    ctx->modal_active = true;
+
+    ctx->active_block = modal;
+}
+
+void ui_render_modal(ui_context_t *ctx)
+{
+    if (ctx->modal_active && ctx->modal_block)
+    {
+        color4_t dim_color = {0, 0, 0, 180};
+        draw_rect_solid_wh(&gc.draw_buffer, 0, 0, 
+                          gc.screen_width, gc.screen_height, 
+                          dim_color);
+        
+        ui_render_block(ctx->modal_block);
+    }
+}
 
 /* -------------- Text Edit Widget Stuff -------------- */
 

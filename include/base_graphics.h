@@ -59,14 +59,14 @@ typedef struct
 #define B(c)           ((u8)  (c)       )
 
 #define RGB_GREY(x) ((color4_t){x, x, x, 255})
-
+#define INV_255     (0.003921f)
 
 #define RGBA_TO_U32(r, g, b, a)  ((u8)(r) | ((u8)(g) << 8) | ((u8)(b) << 16) | ((u8)(a) << 24))
 #define HEX_TO_COLOR4(hex) (color4_t){(R(hex) & 0xFF), (G(hex) & 0xFF), (B(hex) & 0xFF), 255}   
 #define HEX_TO_COLOR4_NORMALIZED(hex) \
-    (color4_t){(R(hex) & 0xFF) * (1.0f/255.0f),\
-               (G(hex) & 0xFF) * (1.0f/255.0f),\
-               (B(hex) & 0xFF) * (1.0f/255.0f),\
+    (color4_t){(R(hex) & 0xFF) * INV_255,\
+               (G(hex) & 0xFF) * INV_255,\
+               (B(hex) & 0xFF) * INV_255,\
                 1.0f}
 #define HEX_TO_RGBA(s,hex)  \
     s.r = (R(hex) & 0xFF);  \
