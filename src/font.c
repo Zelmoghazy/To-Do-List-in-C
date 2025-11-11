@@ -8,7 +8,7 @@ font_tt* load_font_from_file(const char *filename, f32 font_size)
 {
     FILE *file = fopen(filename, "rb");
     if (!file) {
-        fprintf(stderr, "Failed to open font file: %s\n", filename);
+        fprintf(stderr, "Error : Failed to open font file: %s\n", filename);
         return NULL;
     }
     
@@ -38,7 +38,7 @@ font_tt* init_font_tt(u8 *font_buffer, f32 font_size)
     
     if (!stbtt_InitFont(&font->info, font_buffer, 0)) 
     {
-        fprintf(stderr, "Failed to initialize font\n");
+        fprintf(stderr, "Error : Failed to initialize font\n");
         free(font);
         return NULL;
     }

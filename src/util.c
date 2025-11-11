@@ -48,16 +48,14 @@ void log_color(char *text, char c)
 void log_error(i32 error_code, const char* file, i32 line)
 {
     if (error_code != 0){
-        fprintf(stderr,"Error %d, In file: %s, Line : %d \n",error_code, file, line);
-        exit(1);
+        fprintf(stderr,"Error %d, In file: %s, Line : %d \n", error_code, file, line);
     }
 }
 
 void* check_ptr(void *ptr, const char* file, i32 line)
 {
     if(ptr == NULL){
-        fprintf(stderr, "In file: %s, Line : %d \n", file, line);
-        exit(1);
+        fprintf(stderr, "Error ! Null Pointer Detected, In file: %s, Line : %d \n", file, line);
     }
     return ptr;
 }
@@ -824,7 +822,7 @@ f64 get_time_difference(void *last_time)
     clock_gettime(CLOCK_MONOTONIC, &now);
     struct timespec *last_time_posix = (struct timespec *)last_time;
     dt = (now.tv_sec - last_time_posix->tv_sec) +
-         (now.tv_nsec - last_time_posix->tv_nsec) / 1e9f;
+         (now.tv_nsec - last_time_posix->tv_nsec) / 1e9;
     *last_time_posix = now;
 #endif
 

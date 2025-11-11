@@ -47,16 +47,28 @@ typedef struct
     bool toggled;
     bool released;
     bool dragging;
+    bool resizing;
+    bool resize_left, resize_right, resize_top, resize_bottom;
 } ui_block_state_t;
 
-typedef struct { char *key; ui_block_state_t value; } ui_block_state_map_t;
+typedef struct { char *key; ui_block_state_t value; } ui_block_map_t;
 
 typedef enum
 {
+    NO_LAYOUT,
     VERTICAL_LAYOUT,
     HORIZONTAL_LAYOUT,
-    NO_LAYOUT
 }layout_t;
+
+typedef enum 
+{
+    HIT_REGION_NONE = 0,
+    HIT_REGION_LEFT_EDGE,
+    HIT_REGION_RIGHT_EDGE,
+    HIT_REGION_TOP_EDGE,
+    HIT_REGION_BOTTOM_EDGE,
+    HIT_REGION_DRAG_HANDLE,
+} hit_region_t;
 
 /*
     a block is the basic unit of all widgets
@@ -65,7 +77,7 @@ typedef enum
 */
 typedef struct ui_block_t
 {
-    // also used to caluculat the ID that is used
+    // also used to calculate the ID that is used
     // to uniquely identify the block
     // Ensure that it is unique !
     char *title;
@@ -116,6 +128,10 @@ typedef struct ui_block_t
     bool draggable;
     bool dragging;
 
+    bool resizeable;
+    bool resizing;
+    bool resize_left, resize_right, resize_top, resize_bottom;
+
     bool toggleable;
     bool toggled;
 
@@ -164,10 +180,10 @@ typedef struct ui_block_t
 #define LIST_FOR_EACH_DOWN(pos, head) \
     for ((pos) = (head); (pos) != NULL; (pos) = (pos)->next)
 
-typedef struct ui_context_t
+typedef struct
 {
     ui_block_t *root_block;
-    ui_block_t *active_block;          
+    ui_block_t *current_block;          
 
     ui_block_t *modal_block;
     u32 modal_active;
@@ -181,7 +197,6 @@ typedef struct ui_context_t
 
     u32 hot_block_id;
     u32 active_block_id;
-
 } ui_context_t;
 
 #define TEXT_BUFFER_MAX 512
@@ -219,15 +234,16 @@ typedef struct
 struct context_t
 {
     void               *window;
+
+    image_view_t        draw_buffer;
     u32                 screen_width;
     u32                 screen_height;
-    image_view_t        draw_buffer;
-
-    GLFWcursor          *hand_cursor;
-    GLFWcursor          *regular_cursor;
 
     GLuint              texture;
     GLuint              read_fbo;
+
+    GLFWcursor          *hand_cursor;
+    GLFWcursor          *regular_cursor;
 
     i32                 mouse_x;
     i32                 mouse_last_x;
@@ -237,9 +253,15 @@ struct context_t
     bool                left_button_down;
     bool                right_button_down;
 
-    ui_context_t            *ui_ctx;
-    ui_block_state_map_t    *block_map;
-    text_edit_map_t         *text_map;
+    bool                key_pressed[GLFW_KEY_LAST];
+    bool                key_just_pressed[GLFW_KEY_LAST];
+
+    char                input_char_queue[32];
+    i32                 input_char_count;
+
+    ui_context_t        *ui_ctx;
+    ui_block_map_t      *block_map;
+    text_edit_map_t     *text_map;
 
     char                *focused_text_edit;
 
@@ -261,6 +283,17 @@ struct context_t
     bool                changed;
     bool                debug;
 
+    bool                scroll;
+    f32                 scroll_x;
+    f32                 scroll_y;
+
+    bool                mouse_move;
+    f32                 mouse_xoffs;
+    f32                 mouse_yoffs;
+
+    bool                mouse_btn;
+
+
     /* TIME */
     i32                 start_time;
     f64                 dt;
@@ -275,19 +308,13 @@ struct context_t
     f64                 current_fps;
 
     arena_t             *frame_arena;
+    arena_t             *persistent_arena;  // Survives reloads
 }gc;
 
 char frametime[BUFFER_SIZE];
 
 char prof_buf[64][BUFFER_SIZE];
 i32 prof_buf_count;
-i32 prof_max_width;
-
-bool key_pressed[GLFW_KEY_LAST];
-bool key_just_pressed[GLFW_KEY_LAST];
-
-char input_char_queue[32];
-i32 input_char_count = 0;
 
 void render_all(void);
 void ui_scroll_block(ui_block_t *block, i32 delta_x, i32 delta_y);
@@ -301,6 +328,10 @@ void ui_update_block_interaction(ui_block_t *block);
 void ui_render_block(ui_block_t *block);
 void reset_block_interaction(ui_block_t *block);
 void ui_render_modal(ui_context_t *ctx);
+ui_block_t *ui_block_find_by_id(ui_context_t *ctx, u32 block_id);
+bool is_in_drag_handle(ui_block_t *block, i32 mouse_x, i32 mouse_y, rect_t *drag_rect);
+hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_rect_out);
+
 
 
 void set_dark_mode(GLFWwindow *window)
@@ -317,14 +348,13 @@ void set_dark_mode(GLFWwindow *window)
 
 void set_window_icon(char *path)
 {
-    // Load and set window icon
     GLFWimage icon;
     icon.pixels = stbi_load(path, &icon.width, &icon.height, NULL, 4);
     if (icon.pixels) {
         glfwSetWindowIcon(gc.window, 1, &icon);
         stbi_image_free(icon.pixels);
     } else {
-        fprintf(stderr, "Failed to load window icon\n");
+        fprintf(stderr, "Error : Failed to load window icon\n");
     }
 }
 
@@ -339,11 +369,6 @@ void prof_record_results(void)
                    (u64)g_prof_storage.entries[i].hit_count,
                    g_prof_storage.entries[i].elapsed_ms);
 
-            i32 text_length = (i32)strlen(prof_buf[i]);
-            if(text_length > prof_max_width){
-                prof_max_width = text_length;
-            }
-            
             prof_buf_count++;
         }
     }
@@ -351,7 +376,6 @@ void prof_record_results(void)
 
 void render_prof_entries(void)
 {
-    prof_max_width = 0;
 
     i32 height = get_line_height(gc.font)*prof_buf_count;
     i32 width = 0;
@@ -378,9 +402,9 @@ void render_prof_entries(void)
 void reset_input_for_frame(void) 
 {
     for (i32 i = 0; i < GLFW_KEY_LAST; i++) {
-        key_just_pressed[i] = false;
+        gc.key_just_pressed[i] = false;
     }
-    input_char_count = 0;
+    gc.input_char_count = 0;
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
@@ -436,9 +460,10 @@ void mouse_callback(GLFWwindow* window, f64 xpos, f64 ypos)
     f32 xoffset, yoffset;
     get_mouse_delta(&xoffset, &yoffset);
 
-    PROFILE("Hit test"){
-        ui_handle_mouse_move(gc.ui_ctx, xoffset, yoffset);
-    }
+    gc.mouse_xoffs+=xoffset;
+    gc.mouse_yoffs+=xoffset;
+
+    gc.mouse_move = true;
 }
 
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) 
@@ -448,10 +473,10 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
     (void)yoffset;
 
     f32 scroll_sensitivity = 25.0f;
-    f32 scaled_x = (f32)xoffset * scroll_sensitivity;
-    f32 scaled_y = (f32)yoffset * scroll_sensitivity;
+    gc.scroll_x += (f32)xoffset * scroll_sensitivity;
+    gc.scroll_y += (f32)yoffset * scroll_sensitivity;
 
-    ui_handle_scroll(gc.ui_ctx, scaled_x, -scaled_y);
+    gc.scroll = true;
 }
 
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
@@ -467,8 +492,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
     {
         gc.right_button_down = (action == GLFW_PRESS);
     }
-
-    ui_handle_mouse_button(gc.ui_ctx);
+    gc.mouse_btn = true;
 }
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) 
@@ -479,12 +503,12 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
 
     if (action == GLFW_PRESS) 
     {
-        key_pressed[key] = true;
-        key_just_pressed[key] = true;
+        gc.key_pressed[key] = true;
+        gc.key_just_pressed[key] = true;
     } 
     else if (action == GLFW_RELEASE) 
     {
-        key_pressed[key] = false;
+        gc.key_pressed[key] = false;
     }
 
     if (action == GLFW_PRESS || action == GLFW_REPEAT) 
@@ -508,9 +532,9 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
             case GLFW_KEY_F7:
                 gc.dock = !gc.dock;
                 if(gc.dock){
-                    animation_start((u64)&gc.side_panel_x, gc.side_panel_x, 500, 1, EASE_IN_OUT_CUBIC);
+                    animation_start((u64)&gc.side_panel_x, gc.side_panel_x, 0.5f, 1, EASE_IN_OUT_CUBIC);
                 }else{
-                    animation_start((u64)&gc.side_panel_x, gc.side_panel_x, 10, 1, EASE_IN_OUT_CUBIC);
+                    animation_start((u64)&gc.side_panel_x, gc.side_panel_x, 0.01f, 1, EASE_IN_OUT_CUBIC);
                 }
                 break;
             case GLFW_KEY_W:
@@ -550,8 +574,8 @@ void char_callback(GLFWwindow* window, unsigned int codepoint)
     (void)window;
 
     if (codepoint >= 32 && codepoint <= 126) {
-        if (input_char_count < 31) {
-            input_char_queue[input_char_count++] = (char)codepoint;
+        if (gc.input_char_count < 31) {
+            gc.input_char_queue[gc.input_char_count++] = (char)codepoint;
         }
     }
 }
@@ -576,6 +600,7 @@ void ui_new_frame(ui_context_t *ctx)
 ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width, u32 height, layout_t layout)
 {
     if (ctx->block_count >= MAX_BLOCKS){
+        fprintf(stderr, "Error : failed to add a new block, exceeded maximum number of blocks");
         return NULL;
     } 
     
@@ -586,6 +611,7 @@ ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width
     // check for duplicates
     for (i32 i = 0; i < ctx->block_count; i++){
         if (ctx->blocks[i]->id == block->id){
+            fprintf(stderr, "Error : failed to add a new block, duplicate ID");
             return NULL;
         }
     }
@@ -601,8 +627,8 @@ ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width
     block->w = block->scissor_region.w = width;
     block->h = block->scissor_region.h = height;
 
-    block->content_width = (i32)width;
-    block->content_height = (i32)height;
+    block->content_width  = width;
+    block->content_height = height;
 
     block->bg_color = HEX_TO_COLOR4(0x282a36);
     block->border_color = HEX_TO_COLOR4(0x3a3d4e);
@@ -622,11 +648,23 @@ ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width
 
     ctx->blocks[ctx->block_count++] = block;
 
+    /*
+        Load any persistent state from previous frame 
+     */
     ui_block_load_state(block);
 
+    // if not hot just reset all interaction states
     if(block->id != ctx->hot_block_id)
     {
-        reset_block_interaction(block);
+        block->hover = false;
+    }
+
+    if(block->id != ctx->active_block_id)
+    {
+        block->dragging = false;
+        block->resizing = false;
+        block->released = false;
+        block->clicked = false;
     }
     
     return block;
@@ -637,24 +675,25 @@ ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width
  */
 void ui_add_child(ui_context_t *ctx, ui_block_t *child)
 {
-    child->parent = ctx->active_block;
+    child->parent = ctx->current_block;
     child->next = NULL;
     child->prev = NULL;
 
-    if (ctx->active_block->first == NULL)
+    // first child
+    if (ctx->current_block->first == NULL)
     {
-        ctx->active_block->first = child;
-        ctx->active_block->last = child;
+        ctx->current_block->first = child;
+        ctx->current_block->last = child;
     }
     else
     {
-        child->prev = ctx->active_block->last;
-        ctx->active_block->last->next = child;
-        ctx->active_block->last = child;
+        child->prev = ctx->current_block->last;
+        ctx->current_block->last->next = child;
+        ctx->current_block->last = child;
     }
-    ctx->active_block->child_count++;
+    ctx->current_block->child_count++;
 
-    // not started with begin panel just add them to the layout order
+    // leaf nodes just add them to the layout order
     if(IS_LEAF(child)){
         ctx->layout_order[ctx->layout_count++]=child;
     }
@@ -691,8 +730,10 @@ void ui_block_to_screen_coords(ui_block_t *block, i32 block_x, i32 block_y, i32 
     }
     
     // offset the scroll 
-    *screen_x = block_x - block->scroll_x;
-    *screen_y = block_y - block->scroll_y;
+    // *screen_x = block_x - block->scroll_x;
+    // *screen_y = block_y - block->scroll_y;
+    *screen_x = block_x;
+    *screen_y = block_y;
     
     // Walk up the parent chain
     ui_block_t *current = NULL;
@@ -721,6 +762,11 @@ void ui_screen_to_block_coords(ui_block_t *block, i32 screen_x, i32 screen_y, i3
     *block_y += block->scroll_y;
 }
 
+/*
+    Get the block absolute screen position 
+        - take into account its parent scroll (its own scroll irrelevant)
+        - take into account if it is dragged or not
+ */
 void ui_block_abs_pos(ui_block_t *block, i32 *abs_x, i32 *abs_y)
 {
     *abs_x = block->x;
@@ -825,6 +871,19 @@ void ui_draw_block_background(ui_block_t *block)
                         block->h, 
                         block->bg_color);
 
+    if(block->draggable || block->resizeable)
+    {
+        rect_t handle_rect;
+        if(is_in_hit_region(block, gc.mouse_x, gc.mouse_y, &handle_rect))
+        {
+            draw_rect_scissored(&gc.draw_buffer,
+                                handle_rect.x,
+                                handle_rect.y,
+                                handle_rect.w,
+                                handle_rect.h,
+                                lite(block->bg_color));
+        }
+    }
     if (block->border_width > 0) 
     {
         draw_rect_scissored(&gc.draw_buffer,
@@ -870,7 +929,7 @@ void ui_scroll_block(ui_block_t *block, i32 delta_x, i32 delta_y)
     block->scroll_y = Clamp(0, block->scroll_y, block->max_scroll_y);
 
     // save scroll values
-    ui_block_state_map_t *state = shgetp_null(gc.block_map, block->title);
+    ui_block_map_t *state = shgetp_null(gc.block_map, block->title);
     if(state)
     {
         state->value.scroll_x = block->scroll_x;
@@ -880,6 +939,9 @@ void ui_scroll_block(ui_block_t *block, i32 delta_x, i32 delta_y)
 
 void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
 {
+    (void)delta_x;
+    (void)delta_y;
+
     ui_block_t *target = ui_block_at_point(ctx, (i32)gc.mouse_x, (i32)gc.mouse_y);
 
     // block interaction not inside the modal block when active
@@ -890,10 +952,11 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
         }
     }
         
-    if(target)
+    if(target && target->visible)
     {
         ctx->hot_block_id = target->id;
 
+        // was not hot last frame
         if(!target->hover)
         {
             target->hover = true;
@@ -902,54 +965,153 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
             }
         }
 
-        if(target->dragging)
-        {
-            target->drag_delta_x = (f32)gc.mouse_x - target->drag_start_x;
-            target->drag_delta_y = (f32)gc.mouse_y - target->drag_start_y;
-        }
-
         // do custom update if required
-        if(target->custom_update){
+        if(target->custom_update)
+        {
             target->custom_update(target);
         }
-
         ui_block_save_state(target);
+
+        glfwSetCursor(gc.window, gc.hand_cursor);
     }
     else
     {
+        glfwSetCursor(gc.window, gc.regular_cursor);
         ctx->hot_block_id = 0;
     }
+}
+
+
+hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_rect_out) 
+{
+    if (!block->visible) return HIT_REGION_NONE;
+    
+    i32 ax, ay;
+    ui_block_abs_pos(block, &ax, &ay);
+
+    i32 drag_handle_height = block->border_width + block->padding_top;
+    i32 resize_width = 10;
+
+    rect_t drag_handle = {.x = ax,.y = ay,.w = block->w,.h = drag_handle_height};
+    rect_t left_edge = {.x = ax, .y = ay, .w = resize_width, .h = block->h};
+    rect_t right_edge = {.x = ax + block->w - resize_width, .y = ay, .w = resize_width, .h = block->h};
+    rect_t top_edge = {.x = ax, .y = ay, .w = block->w, .h = resize_width};
+    rect_t bottom_edge = {.x = ax, .y = ay + block->h - resize_width, .w = block->w, .h = resize_width};
+    
+    if (inside_rect(mx, my, &left_edge)) 
+    {
+        if (drag_rect_out) {
+            *drag_rect_out = left_edge;
+        }
+        return HIT_REGION_LEFT_EDGE;
+    }
+    
+    if (inside_rect(mx, my, &right_edge)) 
+    {
+        if (drag_rect_out) {
+            *drag_rect_out = right_edge;
+        }
+        return HIT_REGION_RIGHT_EDGE;
+    }
+    
+    if (inside_rect(mx, my, &top_edge)) 
+    {
+        if (drag_rect_out) {
+            *drag_rect_out = top_edge;
+        }
+        return HIT_REGION_TOP_EDGE;
+    }
+    
+    if (inside_rect(mx, my, &bottom_edge)) 
+    {
+        if (drag_rect_out) {
+            *drag_rect_out = bottom_edge;
+        }
+        return HIT_REGION_BOTTOM_EDGE;
+    }
+    
+    if (inside_rect(mx, my, &drag_handle)) 
+    {
+        if (drag_rect_out) {
+            *drag_rect_out = drag_handle;
+        }
+        return HIT_REGION_DRAG_HANDLE;
+    }
+    
+    return HIT_REGION_NONE;
 }
 
 void ui_handle_mouse_button(ui_context_t *ctx)
 {
     ui_block_t *target = ui_block_at_point(ctx, (i32)gc.mouse_x, (i32)gc.mouse_y);
 
-    if (target)
+    if (target && target->visible)
     {
-        ctx->active_block_id = target->id;
-
         if (gc.left_button_down)
         {
             if(target->hover)
             {
+                ctx->active_block_id = target->id;
+
                 target->clicked = true;
                 printf("Block : %s clicked\n", target->title);
 
-                // handle dragging 
-                if(target->draggable && !target->dragging)
+                i32 abs_x, abs_y;
+                ui_block_abs_pos(target, &abs_x, &abs_y);
+
+                rect_t drag_rect;
+                hit_region_t region = is_in_hit_region(target, gc.mouse_x, gc.mouse_y, &drag_rect);
+
+                switch(region)
                 {
-                    // first time getting dragged
-                    target->dragging = true;
-                    target->drag_start_x = (f32)gc.mouse_x;
-                    target->drag_start_y = (f32)gc.mouse_y;
+                    case HIT_REGION_NONE:
+                    case HIT_REGION_LEFT_EDGE:
+                        if(target->resizeable && !target->resizing)
+                        {
+                            target->resizing = true;
+                            target->resize_left = true;
+                            target->drag_start_x = abs_x - gc.mouse_x;
+                        }
+                        break;
+                    case HIT_REGION_RIGHT_EDGE:
+                        if(target->resizeable && !target->resizing)
+                        {
+                            target->resizing = true;
+                            target->resize_right = true;
+                            target->drag_start_x = (abs_x + target->w) - gc.mouse_x;
+                        }
+                        break;
+                    case HIT_REGION_TOP_EDGE:
+                        if(target->resizeable && !target->resizing)
+                        {
+                            target->resizing = true;
+                            target->resize_top = true;
+                            target->drag_start_y = abs_y - gc.mouse_y;
+                        }
+                        break;
+                    case HIT_REGION_BOTTOM_EDGE:
+                        if(target->resizeable && !target->resizing)
+                        {
+                            target->resizing = true;
+                            target->resize_bottom = true;
+                            target->drag_start_y = (abs_y + target->h) - gc.mouse_y;
+                        }
+                        break;
+                    case HIT_REGION_DRAG_HANDLE:
+                        if(target->draggable && !target->dragging)
+                        {
+                            target->dragging = true;
+                            target->drag_start_x = abs_x - gc.mouse_x;
+                            target->drag_start_y = abs_y - gc.mouse_y;
+                        }
+                        break;
                 }
             }
         }
         else
         {
             // Was clicked and not anymore
-            if(target->clicked && target->hover)
+            if(ctx->active_block_id == target->id)
             {
                 target->released = true;
                 printf("Block : %s released\n", target->title);
@@ -964,9 +1126,11 @@ void ui_handle_mouse_button(ui_context_t *ctx)
 
             target->clicked = false;
             target->dragging = false;
+            target->resizing = false;
+            target->resize_left = target->resize_right = false;
+            target->resize_top = target->resize_bottom = false;
 
             ctx->active_block_id = 0;
-
         }
         
         if (gc.right_button_down) 
@@ -974,7 +1138,6 @@ void ui_handle_mouse_button(ui_context_t *ctx)
         } 
         else 
         {
-
         }
 
         ui_block_save_state(target);
@@ -990,15 +1153,18 @@ void ui_handle_scroll(ui_context_t *ctx, f32 scroll_x, f32 scroll_y)
 {
     ui_block_t *target = ui_block_at_point(ctx, (i32)gc.mouse_x, (i32)gc.mouse_y);
 
-    // traverse upwards until you find a scrollable block
-    ui_block_t *current = NULL;
-    LIST_FOR_EACH_UP(current, target)
+    if(target && target->visible)
     {
-        if (current && current->scrollable) {
-            ui_scroll_block(current, (i32)(scroll_x), (i32)(scroll_y));
-            // scrolling will change cursor position relative to the blocks
-            ui_handle_mouse_move(ctx, 0.0f, 0.0f);
-            return;
+        // traverse upwards until you find a scrollable block
+        ui_block_t *current = NULL;
+        LIST_FOR_EACH_UP(current, target)
+        {
+            if (current && current->scrollable) {
+                ui_scroll_block(current, (i32)(scroll_x), (i32)(scroll_y));
+                // scrolling will change cursor position relative to the blocks
+                ui_handle_mouse_move(ctx, 0.0f, 0.0f);
+                return;
+            }
         }
     }
 }
@@ -1026,7 +1192,7 @@ void ui_layout_constraints(ui_block_t *block)
                 default_item_height = block->default_child_height;
 
                 ui_block_t *child = NULL;
-                LIST_FOR_EACH_DOWN(child,block->first)
+                LIST_FOR_EACH_DOWN(child, block->first)
                 {                        
                     if (IS_LEAF(child) && child->text.string){
                         text_height = get_line_height(child->text.font);
@@ -1055,8 +1221,38 @@ void ui_layout_constraints(ui_block_t *block)
 
                 break;
             }
+            case NO_LAYOUT:
+                break;
         }
     }
+}
+
+bool is_block_visible(ui_block_t *child, ui_block_t *parent)
+{
+    if(!parent || !child)
+        return true;
+
+    i32 abs_x, abs_y;
+    ui_block_abs_pos(child, &abs_x, &abs_y);
+
+    rect_t child_rect = {
+        .x = abs_x,
+        .y = abs_y,
+        .w = child->w,
+        .h = child->h
+    };
+
+    ui_block_abs_pos(parent, &abs_x, &abs_y);
+    rect_t parent_scissor = {
+        .x = abs_x,
+        .y = abs_y,
+        .w = parent->w,
+        .h = parent->h
+    };
+
+    rect_t intersection = intersect_rects(&child_rect, &parent_scissor);
+
+    return (intersection.x || intersection.y || intersection.w || intersection.h);
 }
 
 void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
@@ -1177,13 +1373,20 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
 
                 break;
             }
+            case NO_LAYOUT:
+                break;
         }
+
         ui_set_block_content_size(block, content_width, content_height);
     }
 }
 
 void draw_scroll_bar(ui_block_t *block)
 {
+    if (block->max_scroll_y <= 0) {
+        return;
+    }
+    
     i32 gap = block->border_width * 4;
     i32 scroll_thumb_width = block->border_width * 2;
     
@@ -1200,29 +1403,110 @@ void draw_scroll_bar(ui_block_t *block)
     i32 scroll_thumb_height = (i32)(block->h * visible_ratio);
     scroll_thumb_height = MAX(scroll_thumb_height, scroll_thumb_width * 2);
 
-    i32 scroll_bar_min_y = block->y + block->scroll_y;
+    i32 scroll_bar_min_y = block->y;
     i32 scroll_bar_max_y = scroll_bar_min_y + block->h - scroll_thumb_height;
     
     f32 scroll_bar_ratio = fabsf((f32)(block->scroll_y)/(f32)(block->max_scroll_y));
 
     i32 scroll_bar_y = LERP_F32(scroll_bar_min_y, scroll_bar_max_y, scroll_bar_ratio);
     
-    ui_draw_rect_in_block(block, scroll_bar_x, scroll_bar_y, 
-                      scroll_thumb_width, scroll_thumb_height, HEX_TO_COLOR4(0x525356));
+    ui_draw_rect_in_block(block, scroll_bar_x, scroll_bar_y, scroll_thumb_width, scroll_thumb_height, HEX_TO_COLOR4(0x525356));
 }
 
 void ui_begin_panel(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width, u32 height, layout_t layout)
 {
-    ui_block_t *panel = ui_new_block(ctx, title, x, y, width, height, layout);
+    ui_block_t *panel = CHECK_PTR(ui_new_block(ctx, title, x, y, width, height, layout));
+
+    if(!panel){
+        return;
+    }
 
     panel->is_leaf = false;
     panel->scrollable = true;
 
-    if(ctx->active_block)
+    if(ctx->current_block)
     {
         ui_add_child(ctx, panel);
     }
-    ctx->active_block = panel;
+    ctx->current_block = panel;
+}
+
+void ui_update_floating_panel(ui_block_t *block)
+{
+    static bool first_update = true;
+    static rect_t new_pos ={0};
+
+    if(first_update){
+        new_pos.x = block->x;
+        new_pos.y = block->y;
+        new_pos.w = block->w;
+        new_pos.h = block->h;
+        first_update=false;
+    }
+
+    if(block->id && gc.ui_ctx->active_block_id)
+    {
+        if(block->dragging)
+        {   
+            new_pos.x = (f32)gc.mouse_x + block->drag_start_x;
+            new_pos.y = (f32)gc.mouse_y + block->drag_start_y;
+        }
+        if (block->resizing)
+        {
+            if (block->resize_left) {
+                i32 delta = gc.mouse_x + block->drag_start_x - new_pos.x;
+                new_pos.x += delta;
+                new_pos.w -= delta;
+            }
+            if (block->resize_right) {
+                new_pos.w = gc.mouse_x + block->drag_start_x - new_pos.x;
+            }
+            if (block->resize_top) {
+                i32 delta = gc.mouse_y + block->drag_start_y - new_pos.y;
+                new_pos.y += delta;
+                new_pos.h -= delta;
+            }
+            if (block->resize_bottom) {
+                new_pos.h = gc.mouse_y + block->drag_start_y - new_pos.y;
+            }
+            
+            if (new_pos.w < 100) new_pos.w = 100;
+            if (new_pos.h < 100) new_pos.h = 100;
+        }
+    }
+
+    block->x=new_pos.x;
+    block->y=new_pos.y;
+    block->w=new_pos.w;
+    block->h=new_pos.h;
+}
+
+void ui_begin_panel_floating(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width, u32 height)
+{
+    ui_block_t *panel = CHECK_PTR(ui_new_block(ctx, title, x, y, width, height, NO_LAYOUT));
+
+    if(!panel){
+        return;
+    }
+
+    panel->is_leaf    = false;
+    panel->scrollable = true;
+    panel->draggable  = true;
+    panel->resizeable = true;
+
+    panel->custom_update = ui_update_floating_panel;
+
+    if(ctx->current_block)
+    {
+        ui_add_child(ctx, panel);
+    }
+    ctx->current_block = panel;
+}
+
+void ui_end_panel(ui_context_t *ctx)
+{
+    ctx->layout_order[ctx->layout_count++] = ctx->current_block;
+    ctx->current_block = ctx->current_block->parent;
 }
 
 void ui_layout(ui_context_t *ctx)
@@ -1236,7 +1520,60 @@ void ui_layout(ui_context_t *ctx)
     for (i32 i = 0; i < ctx->layout_count; i++)
     {
         ui_block_t *block = ctx->layout_order[i];
-        ui_block_layout(ctx, block);  // modified version
+        ui_block_layout(ctx, block); 
+    }
+
+    for (i32 i = ctx->layout_count - 1; i >= 0; i--)
+    {
+        ui_block_t *block = ctx->layout_order[i];
+        
+        if (!block->parent) {
+            block->visible = true;
+            continue;
+        }
+        
+        block->visible = true;
+        
+        ui_block_t *ancestor;
+        LIST_FOR_EACH_UP(ancestor, block->parent)
+        {
+            if (!ancestor->visible) {
+                block->visible = false;
+                break;
+            }
+            
+            if (!is_block_visible(block, ancestor)) {
+                block->visible = false;
+                break;
+            }
+        }
+    }
+}
+
+void ui_update(ui_context_t *ctx)
+{
+    if(gc.mouse_move)
+    {
+        PROFILE("Hit test"){
+            ui_handle_mouse_move(ctx, gc.mouse_xoffs, gc.mouse_yoffs);
+        }
+        gc.mouse_move = false;
+        gc.mouse_xoffs=0;
+        gc.mouse_yoffs=0;
+    }
+
+    if(gc.scroll)
+    {
+        ui_handle_scroll(ctx, gc.scroll_x, -gc.scroll_y);
+        gc.scroll = false;
+        gc.scroll_x = 0;
+        gc.scroll_y = 0;
+    }
+
+    if(gc.mouse_btn)
+    {
+        ui_handle_mouse_button(ctx);
+        gc.mouse_btn = false;
     }
 }
 
@@ -1254,15 +1591,10 @@ void ui_render(ui_context_t *ctx)
 
 }
 
-void ui_end_panel(ui_context_t *ctx)
-{
-    ctx->layout_order[ctx->layout_count++] = ctx->active_block;
-    ctx->active_block = ctx->active_block->parent;
-}
 
 void ui_block_load_state(ui_block_t *block)
 {
-    ui_block_state_map_t *state = shgetp_null(gc.block_map, block->title);
+    ui_block_map_t *state = shgetp_null(gc.block_map, block->title);
 
     if(state)
     {
@@ -1272,8 +1604,15 @@ void ui_block_load_state(ui_block_t *block)
         block->toggled = state->value.toggled;
         block->released = state->value.released;
         block->dragging = state->value.dragging;
+        block->resizing = state->value.resizing;
+        block->resize_left = state->value.resize_left;
+        block->resize_right = state->value.resize_right;
+        block->resize_top = state->value.resize_top;
+        block->resize_bottom = state->value.resize_bottom;
         block->drag_delta_x = state->value.drag_delta_x; 
         block->drag_delta_y = state->value.drag_delta_y;
+        block->drag_start_x = state->value.drag_start_x; 
+        block->drag_start_y = state->value.drag_start_y;
         block->scroll_y = state->value.scroll_y;
         block->scroll_x = state->value.scroll_x;
     }
@@ -1293,8 +1632,15 @@ void ui_block_save_state(ui_block_t *block)
         .toggled = block->toggled,
         .released = block->released,
         .dragging = block->dragging,
+        .resizing   = block->resizing,
+        .resize_left = block->resize_left,
+        .resize_right = block->resize_right,
+        .resize_top   = block->resize_top,
+        .resize_bottom   = block->resize_bottom,
         .drag_delta_x = block->drag_delta_x,
         .drag_delta_y = block->drag_delta_y,
+        .drag_start_x = block->drag_start_x,
+        .drag_start_y = block->drag_start_y,
         .scroll_y = block->scroll_y,
         .scroll_x = block->scroll_x,
     };
@@ -1323,6 +1669,8 @@ void ui_render_block(ui_block_t *block)
         return;
     }
     
+    ui_update_block_interaction(block);
+
     if (block->custom_render) 
     {
         block->custom_render(block);
@@ -1349,7 +1697,6 @@ void ui_render_block(ui_block_t *block)
                 block->scissor_region.w - 2 * block->border_width,
                 block->scissor_region.h - 2 *  block->border_width);
 
-        ui_update_block_interaction(block);
 
         ui_block_t *child = NULL;
         LIST_FOR_EACH_DOWN(child, block->first)
@@ -1367,6 +1714,8 @@ void ui_render_block(ui_block_t *block)
 void reset_block_interaction(ui_block_t *block)
 {
     block->hover = false;
+    // block->released = false;
+    // block->clicked = false;
 }
 
 /* -------------- Checkbox Widget Stuff -------------- */
@@ -1416,7 +1765,7 @@ void ui_render_checkbox(ui_block_t *block)
 bool ui_checkbox(ui_context_t *ctx, char *title)
 {
     
-    ui_block_t *checkbox = ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT);
+    ui_block_t *checkbox = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT));
 
     checkbox->is_leaf = true;
     checkbox->clickable = true;
@@ -1444,9 +1793,9 @@ void ui_render_button(ui_block_t *block)
 
 bool ui_button(ui_context_t *ctx, char *title)
 {
-    if (!ctx->active_block) return false;
+    if (!ctx->current_block) return false;
     
-    ui_block_t *button = ui_new_block(ctx, title, 0,0,0,0,NO_LAYOUT);
+    ui_block_t *button = CHECK_PTR(ui_new_block(ctx, title, 0,0,0,0,NO_LAYOUT));
 
     button->is_leaf = true;
     button->clickable = true;
@@ -1524,7 +1873,7 @@ void ui_render_radio(ui_block_t *block)
 
 void ui_radio(ui_context_t *ctx, char *title, i32 *var, i32 val)
 {
-    ui_block_t *radio = ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT);
+    ui_block_t *radio = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT));
 
     radio->is_leaf = true;
     radio->clickable = true;
@@ -1561,14 +1910,23 @@ void ui_render_slider(ui_block_t *block)
     ui_draw_rect_in_block(block, block->x, track_y, handle_x-handle_size, track_height, HEX_TO_COLOR4(0x6200ee));
     ui_draw_rect_in_block(block, block->x+handle_x-handle_size, track_y, block->w-handle_x, track_height, HEX_TO_COLOR4(0xcab6e6));
     
-    // color4_t handle_color = block->dragging ? HEX_TO_COLOR4(0x4ae37b) : HEX_TO_COLOR4(0x4ae37b);
     color4_t handle_color = block->clicked ?  HEX_TO_COLOR4(0x6200ee) : dark(HEX_TO_COLOR4(0x6200ee));
+
+    i32 screen_x, screen_y;
+    ui_block_to_screen_coords(block, handle_x, handle_y, &screen_x, &screen_y);
     
-    ui_draw_rounded_rect_in_block(block, 
-                       handle_x - handle_size/2, 
-                       handle_y - handle_size,
-                       handle_size, handle_size*2, 
-                       handle_color);
+    rect_t handle = {
+        screen_x-handle_size/2.0f,screen_y-handle_size/2.0f,handle_size, handle_size
+    };
+
+    if(inside_rect(gc.mouse_x, gc.mouse_y, &handle))
+    {
+        handle_color =  HEX_TO_COLOR4(0x3149c7);
+    }
+
+    draw_circle_filled_aa(&gc.draw_buffer, screen_x, screen_y, handle_size/2.0, handle_color);
+    // draw_rounded_rect_scissored(&gc.draw_buffer, screen_x, screen_y, handle_size, handle_size*2, 25, handle_color);
+
     
     if (block->text.string) {
         // render_text_in_block(block);
@@ -1577,9 +1935,14 @@ void ui_render_slider(ui_block_t *block)
 
 void ui_update_slider(ui_block_t *block) 
 {
-    // if (!block->dragging || !block->hover) 
-        // return;
-    if(block->clicked){
+    if(block->id != gc.ui_ctx->active_block_id)
+    {
+        block->clicked = false;
+        return;
+    }
+
+    if(block->clicked)
+    {
         i32 abs_x, abs_y;
         ui_block_abs_pos(block, &abs_x, &abs_y);
         
@@ -1592,7 +1955,7 @@ void ui_update_slider(ui_block_t *block)
 
 f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
 {
-    ui_block_t *slider = ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT);
+    ui_block_t *slider = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT));
 
     slider->is_leaf = true;
     slider->clickable = true;
@@ -1618,7 +1981,7 @@ void ui_begin_modal(ui_context_t *ctx, char *title, i32 width, i32 height)
     i32 x = (gc.screen_width - width) / 2;
     i32 y = (gc.screen_height - height) / 2;
     
-    ui_block_t *modal = ui_new_block(ctx, title, x, y, width, height, VERTICAL_LAYOUT);
+    ui_block_t *modal = CHECK_PTR(ui_new_block(ctx, title, x, y, width, height, VERTICAL_LAYOUT));
     
     modal->is_leaf = false;
     modal->scrollable = false;
@@ -1631,7 +1994,7 @@ void ui_begin_modal(ui_context_t *ctx, char *title, i32 width, i32 height)
     ctx->modal_block  = modal;
     ctx->modal_active = true;
 
-    ctx->active_block = modal;
+    ctx->current_block = modal;
 }
 
 void ui_render_modal(ui_context_t *ctx)
@@ -1859,10 +2222,10 @@ void ui_text_edit_update(ui_block_t *block)
     if(!state->focused)
         return;
 
-    if (key_just_pressed[GLFW_KEY_BACKSPACE]) 
+    if (gc.key_just_pressed[GLFW_KEY_BACKSPACE]) 
     {
-        if (key_pressed[GLFW_KEY_LEFT_CONTROL] ||
-            key_pressed[GLFW_KEY_RIGHT_CONTROL]) 
+        if (gc.key_pressed[GLFW_KEY_LEFT_CONTROL] ||
+            gc.key_pressed[GLFW_KEY_RIGHT_CONTROL]) 
         {
             i32 start = 0;            
             for(i32 i = state->cursor_pos-1; i > 0; i--)
@@ -1886,10 +2249,10 @@ void ui_text_edit_update(ui_block_t *block)
         }
     }
 
-    if (key_just_pressed[GLFW_KEY_DELETE]) 
+    if (gc.key_just_pressed[GLFW_KEY_DELETE]) 
     {
-        if (key_pressed[GLFW_KEY_LEFT_CONTROL] ||
-            key_pressed[GLFW_KEY_RIGHT_CONTROL]) 
+        if (gc.key_pressed[GLFW_KEY_LEFT_CONTROL] ||
+            gc.key_pressed[GLFW_KEY_RIGHT_CONTROL]) 
         {
             i32 end = state->buffer_len-1;
 
@@ -1913,10 +2276,10 @@ void ui_text_edit_update(ui_block_t *block)
         }
     }
 
-    if (key_just_pressed[GLFW_KEY_LEFT]) 
+    if (gc.key_just_pressed[GLFW_KEY_LEFT]) 
     {
-        if (key_pressed[GLFW_KEY_LEFT_SHIFT] ||
-            key_pressed[GLFW_KEY_RIGHT_SHIFT]) 
+        if (gc.key_pressed[GLFW_KEY_LEFT_SHIFT] ||
+            gc.key_pressed[GLFW_KEY_RIGHT_SHIFT]) 
         {
             if (state->selection_start < 0) {
                 state->selection_start = state->cursor_pos;
@@ -1925,8 +2288,8 @@ void ui_text_edit_update(ui_block_t *block)
             text_edit_clamp_cursor(state);
             state->selection_end = state->cursor_pos;
         }
-        else if (key_pressed[GLFW_KEY_LEFT_CONTROL] ||
-                key_pressed[GLFW_KEY_RIGHT_CONTROL]) 
+        else if (gc.key_pressed[GLFW_KEY_LEFT_CONTROL] ||
+                gc.key_pressed[GLFW_KEY_RIGHT_CONTROL]) 
         {
             for(i32 i = state->cursor_pos-1; i > 0; i--)
             {
@@ -1949,10 +2312,10 @@ void ui_text_edit_update(ui_block_t *block)
         state->cursor_blink_timer = 0.0;
     }
 
-    if (key_just_pressed[GLFW_KEY_RIGHT]) 
+    if (gc.key_just_pressed[GLFW_KEY_RIGHT]) 
     {
-        if (key_pressed[GLFW_KEY_LEFT_SHIFT] ||
-            key_pressed[GLFW_KEY_RIGHT_SHIFT]) 
+        if (gc.key_pressed[GLFW_KEY_LEFT_SHIFT] ||
+            gc.key_pressed[GLFW_KEY_RIGHT_SHIFT]) 
         {
             if (state->selection_start < 0) {
                 state->selection_start = state->cursor_pos;
@@ -1961,8 +2324,8 @@ void ui_text_edit_update(ui_block_t *block)
             text_edit_clamp_cursor(state);
             state->selection_end = state->cursor_pos;
         }
-        else if (key_pressed[GLFW_KEY_LEFT_CONTROL] ||
-                key_pressed[GLFW_KEY_RIGHT_CONTROL]) 
+        else if (gc.key_pressed[GLFW_KEY_LEFT_CONTROL] ||
+                gc.key_pressed[GLFW_KEY_RIGHT_CONTROL]) 
         {
             for(i32 i = state->cursor_pos; i < state->buffer_len; i++)
             {
@@ -1986,34 +2349,34 @@ void ui_text_edit_update(ui_block_t *block)
         state->cursor_blink_timer = 0.0;
     }
 
-    if (key_just_pressed[GLFW_KEY_HOME]) {
+    if (gc.key_just_pressed[GLFW_KEY_HOME]) {
         state->cursor_pos = 0;
         state->selection_start = -1;
         state->cursor_visible = true;
         state->cursor_blink_timer = 0.0;
     }
     
-    if (key_just_pressed[GLFW_KEY_END]) {
+    if (gc.key_just_pressed[GLFW_KEY_END]) {
         state->cursor_pos = state->buffer_len;
         state->selection_start = -1;
         state->cursor_visible = true;
         state->cursor_blink_timer = 0.0;
     }
 
-    if (key_pressed[GLFW_KEY_LEFT_CONTROL] && key_just_pressed[GLFW_KEY_A]) 
+    if (gc.key_pressed[GLFW_KEY_LEFT_CONTROL] && gc.key_just_pressed[GLFW_KEY_A]) 
     {
         state->selection_start = 0;
         state->selection_end = state->buffer_len;
         state->cursor_pos = state->buffer_len;
     }
 
-    for (i32 i = 0; i < input_char_count; i++) 
+    for (i32 i = 0; i < gc.input_char_count; i++) 
     {
-        text_edit_insert_char(state, input_char_queue[i]);
+        text_edit_insert_char(state, gc.input_char_queue[i]);
         state->cursor_visible = true;
         state->cursor_blink_timer = 0.0;
     }
-    input_char_count = 0;
+    gc.input_char_count = 0;
 
     f32 cursor_x = 5; // Left padding
     for (i32 i = 0; i < state->cursor_pos; i++) 
@@ -2126,7 +2489,7 @@ text_edit_state_t *ui_text_edit(ui_context_t *ctx, char *title, char *initial_te
         shput(gc.text_map, title, state);
     }
 
-    ui_block_t *block = ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT);
+    ui_block_t *block = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT));
 
     block->is_leaf = true;
     block->clickable = true;
@@ -2148,7 +2511,6 @@ void ui_end_frame(ui_context_t *ctx)
 ui_context_t* ui_new_ctx(void)
 {
     ui_context_t *ctx = (ui_context_t*)calloc(1, sizeof(ui_context_t));
-
     gc.block_map = NULL;
 
     return ctx;
@@ -2185,7 +2547,7 @@ void render_all_parallel(void)
 
     gc.draw_buffer.pixels = ARENA_ALLOC(gc.frame_arena, height * width * sizeof(color4_t));
 
-    clear_screen(&gc.draw_buffer, HEX_TO_COLOR4(0x282a36));
+    clear_screen(&gc.draw_buffer, HEX_TO_COLOR4(0xFFFFFF));
 
     i32 num_threads = get_core_count();
     const u32 tile_size = 64;
@@ -2302,7 +2664,7 @@ void render_frame_history_graph(void)
     
     draw_rect_solid_wh(&gc.draw_buffer, 0, 0, graph_width, graph_height, bg_color);
     
-    const f64 target_time = 0.01667;
+    const f64 target_time = 0.01667;//60fps
     
     f64 max_deviation = 0.0;
     for (int i = 0; i < FRAME_HISTORY_SIZE; i++) {
@@ -2312,7 +2674,7 @@ void render_frame_history_graph(void)
         }
     }
     
-    max_deviation = ClampBot(0.008, max_deviation); // At least ±8ms range
+    max_deviation = ClampBot(0.008, max_deviation);
     
     i32 center_y = graph_height / 2;
     i32 available_height = (graph_height - 2 * margin) / 2;
@@ -2358,6 +2720,22 @@ void render_mouse_stuff(void)
 {
     draw_line(&gc.draw_buffer, gc.mouse_x-20, gc.mouse_y, gc.mouse_x+20, gc.mouse_y, gc.left_button_down?COLOR_RED:gc.right_button_down?COLOR_BLUE:COLOR_CYAN);
     draw_line(&gc.draw_buffer, gc.mouse_x, gc.mouse_y-20, gc.mouse_x, gc.mouse_y+20, gc.left_button_down?COLOR_RED:gc.right_button_down?COLOR_BLUE:COLOR_CYAN);
+    // draw_circle_filled_aa(&gc.draw_buffer, gc.mouse_x, gc.mouse_y, 100, COLOR_CYAN);
+    // draw_circle_aa(&gc.draw_buffer, gc.mouse_x, gc.mouse_y, 100, COLOR_CYAN);
+    // draw_rounded_rectangle_filled_aa(&gc.draw_buffer, gc.mouse_x - 100, gc.mouse_y - 50, gc.mouse_x + 100, gc.mouse_y + 50, 20.0f, COLOR_CYAN);
+
+}
+
+ui_block_t *ui_block_find_by_id(ui_context_t *ctx, u32 block_id)
+{
+    for(i32 i = ctx->block_count-1 ; i >= 0; i--)
+    {
+        if(ctx->blocks[i]->id == block_id)
+        {
+            return ctx->blocks[i];
+        }
+    }
+    return NULL;
 }
 
 void render_all(void)
@@ -2370,14 +2748,15 @@ void render_all(void)
 
     gc.draw_buffer.pixels = ARENA_ALLOC(gc.frame_arena, height * width * sizeof(color4_t));
     
-    PROFILE("Clearing the screen why does it take so long ?")
+    PROFILE("Clearing the screen")
     {
         clear_screen(&gc.draw_buffer, HEX_TO_COLOR4(0x282a36));
         // clear_screen_radial_gradient(&gc.draw_buffer, HEX_TO_COLOR4(0x6272a4),HEX_TO_COLOR4(0x282a36));
     }
+    
     ui_new_frame(gc.ui_ctx);
 
-/*     PROFILE("Building and rendering the ui")
+   /*  PROFILE("Building and rendering the ui")
     {
         text_edit_state_t *text_state = NULL;
 
@@ -2421,44 +2800,84 @@ void render_all(void)
         ui_render(gc.ui_ctx);
 
         reset_input_for_frame();
-    } */
-
+    } 
+ */
     PROFILE("Building and rendering the ui")
     {
         text_edit_state_t *text_state = NULL;
 
-        ui_begin_panel(gc.ui_ctx, "Root", gc.side_panel_x, 0, gc.screen_width-gc.side_panel_x, gc.screen_height, VERTICAL_LAYOUT);
-            ui_begin_panel(gc.ui_ctx, "Test1", 0, 0, 0, 100, HORIZONTAL_LAYOUT);
-                ui_begin_panel(gc.ui_ctx, "Test1-1", 0, 0, 100, 0, VERTICAL_LAYOUT);
+        PROFILE("Building UI Tree")
+        {
+            ui_begin_panel(gc.ui_ctx, "Root", gc.side_panel_x*gc.screen_width, 0, (1-gc.side_panel_x)*gc.screen_width, gc.screen_height, VERTICAL_LAYOUT);
+                ui_begin_panel(gc.ui_ctx, "Test1", 0, 0, 0, 100, HORIZONTAL_LAYOUT);
+                    ui_begin_panel(gc.ui_ctx, "Test1-1", 0, 0, 100, 0, VERTICAL_LAYOUT);
+                    ui_end_panel(gc.ui_ctx);
+                    ui_begin_panel(gc.ui_ctx, "Test1-2", 0, 0, 50, 0, HORIZONTAL_LAYOUT);
+                    ui_end_panel(gc.ui_ctx);
+                    ui_button(gc.ui_ctx,"Buttton1");
+                    ui_button(gc.ui_ctx,"Buttton2");
                 ui_end_panel(gc.ui_ctx);
-                ui_begin_panel(gc.ui_ctx, "Test1-2", 0, 0, 50, 0, HORIZONTAL_LAYOUT);
+                    
+                ui_begin_panel(gc.ui_ctx, "Test2", 0, 0, 0, 400, VERTICAL_LAYOUT);
+                    ui_begin_panel(gc.ui_ctx, "Test2-1", 0, 0, 0, 50, HORIZONTAL_LAYOUT);
+                    ui_end_panel(gc.ui_ctx);
+                    ui_begin_panel(gc.ui_ctx, "Test2-2", 0, 0, 0, 100, VERTICAL_LAYOUT);
+                        ui_button(gc.ui_ctx,"test_but_1");
+                        ui_button(gc.ui_ctx,"test_but_2");
+                    ui_end_panel(gc.ui_ctx);
+                    ui_button(gc.ui_ctx,"Buton1");
+                    ui_button(gc.ui_ctx,"Buton2");
+                    ui_button(gc.ui_ctx,"Buton11");
+                    ui_button(gc.ui_ctx,"Buton21");
+                    ui_button(gc.ui_ctx,"Buton12");
+                    ui_button(gc.ui_ctx,"Buton23");
+                    ui_button(gc.ui_ctx,"Buton14");
+                    ui_button(gc.ui_ctx,"Buton25");
                 ui_end_panel(gc.ui_ctx);
-                ui_button(gc.ui_ctx,"Button1");
-                ui_button(gc.ui_ctx,"Button2");
+                
+                ui_begin_panel(gc.ui_ctx, "Test3", 0, 0, 0, 300, VERTICAL_LAYOUT);
+                    ui_slider(gc.ui_ctx,0.0f, 100.0f,"Slider");
+                    text_state = ui_text_edit(gc.ui_ctx, "TextEdit1", "Add your task ..");
+                ui_end_panel(gc.ui_ctx);
             ui_end_panel(gc.ui_ctx);
-            
-            ui_begin_panel(gc.ui_ctx, "Test2", 0, 0, 0, 400, VERTICAL_LAYOUT);
-                ui_begin_panel(gc.ui_ctx, "Test2-1", 0, 0, 0, 50, HORIZONTAL_LAYOUT);
-                ui_end_panel(gc.ui_ctx);
-                ui_begin_panel(gc.ui_ctx, "Test2-2", 0, 0, 0, 50, HORIZONTAL_LAYOUT);
-                ui_end_panel(gc.ui_ctx);
-                ui_button(gc.ui_ctx,"Buton1");
-                ui_button(gc.ui_ctx,"Buton2");
+        }
+
+        PROFILE("UI Layout")
+        {
+            ui_layout(gc.ui_ctx);
+        }
+
+        PROFILE("UI Rendering")
+        {
+            ui_render(gc.ui_ctx);
+        }
+
+        reset_input_for_frame(); 
+    } 
+
+/*    PROFILE("Building and rendering the ui")
+    {
+        text_edit_state_t *text_state = NULL;
+
+        PROFILE("Building UI Tree")
+        {
+            ui_begin_panel_floating(gc.ui_ctx, "Root", 200, 300, 400, 200);
             ui_end_panel(gc.ui_ctx);
-            
-            ui_begin_panel(gc.ui_ctx, "Test3", 0, 0, 0, 300, VERTICAL_LAYOUT);
-                ui_slider(gc.ui_ctx,0.0f, 100.0f,"Slider");
-            text_state = ui_text_edit(gc.ui_ctx, "TextEdit1", "Add your task ..");
-            ui_end_panel(gc.ui_ctx);
-        ui_end_panel(gc.ui_ctx);
+        }
 
-        ui_layout(gc.ui_ctx);
+        PROFILE("UI Layout")
+        {
+            ui_layout(gc.ui_ctx);
+        }
 
-        ui_render(gc.ui_ctx);
+        PROFILE("UI Rendering")
+        {
+            ui_render(gc.ui_ctx);
+        }
 
-        reset_input_for_frame();
-    }
-
+        reset_input_for_frame(); 
+    }*/
+ 
     if(gc.debug)
     {
         render_frame_history_graph();
@@ -2478,13 +2897,28 @@ void render_all(void)
             render_prof_entries();
         }
 
-        for(i32 i = gc.ui_ctx->block_count-1 ; i > 0; i--)
+        for(i32 i = gc.ui_ctx->block_count-1 ; i >= 0; i--)
         {
             if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->hot_block_id)
             {
                 i32 screen_x, screen_y;
                 ui_block_to_screen_coords(gc.ui_ctx->blocks[i], gc.ui_ctx->blocks[i]->x, gc.ui_ctx->blocks[i]->y, &screen_x, &screen_y);
                 draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_GREEN:COLOR_RED);
+                draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->scissor_region.w, gc.ui_ctx->blocks[i]->scissor_region.h, (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_LIME:COLOR_YELLOW);
+                // draw_aaline(&gc.draw_buffer, screen_x, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
+                // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y+gc.ui_ctx->blocks[i]->h, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
+                // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
+                // draw_aaline(&gc.draw_buffer, screen_x, screen_y+gc.ui_ctx->blocks[i]->h, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
+            }
+        }
+
+        for(i32 i = gc.ui_ctx->block_count-1 ; i >= 0; i--)
+        {
+            if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id)
+            {
+                i32 screen_x, screen_y;
+                ui_block_to_screen_coords(gc.ui_ctx->blocks[i], gc.ui_ctx->blocks[i]->x, gc.ui_ctx->blocks[i]->y, &screen_x, &screen_y);
+                draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, COLOR_LIME);
             }
         }
 
@@ -2521,6 +2955,7 @@ void update_all()
     update_time();
     animation_update(gc.dt);
     animation_get((u64)&gc.side_panel_x, &gc.side_panel_x);
+    ui_update(gc.ui_ctx);
 }
 
 void cleanup_all()
@@ -2557,15 +2992,15 @@ void init_framebuffer(i32 max_width, i32 max_height)
 void *create_window(u32 width, u32 height, char *title)
 {
     if (!glfwInit()) {
-        fprintf(stderr, "Failed to initialize GLFW\n");
+        fprintf(stderr, "Error : Failed to initialize GLFW\n");
         return NULL;
     }
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
-    glfwWindowHint(GLFW_SAMPLES, 8); // Enable multisampling for smoother edges
+    glfwWindowHint(GLFW_RESIZABLE, GL_TRUE);
+    // glfwWindowHint(GLFW_SAMPLES, 8); // Enable multisampling for smoother edges
     
     GLFWwindow *window = CHECK_PTR(glfwCreateWindow((int)width, (int)height, title, NULL, NULL));
     
@@ -2588,7 +3023,7 @@ void *create_window(u32 width, u32 height, char *title)
     glewExperimental = GL_TRUE;
     GLenum err = glewInit();
     if (err != GLEW_OK) {
-        fprintf(stderr, "GLEW initialization error: %s\n", glewGetErrorString(err));
+        fprintf(stderr, "Error : GLEW initialization failed: %s\n", glewGetErrorString(err));
         return NULL;
     }
 
@@ -2598,7 +3033,7 @@ void *create_window(u32 width, u32 height, char *title)
     return window;
 }
 
-void init_time()
+void init_time(void)
 {
     get_time(&gc.last_frame_start);
 
@@ -2611,41 +3046,34 @@ void init_time()
 
 bool init_all(void)
 {
-    gc.screen_width = 1100;
+    gc.screen_width  = 1100;
     gc.screen_height = 800;
 
-    gc.window = create_window(gc.screen_width, gc.screen_height, "UI");
+    gc.window = CHECK_PTR(create_window(gc.screen_width, gc.screen_height, "UI"));
 
-    if(!gc.window)
-    {
+    if(!gc.window){
         return false;
     }
 
-    gc.frame_arena = arena_new();
-    (void)ARENA_ALLOC(gc.frame_arena, MB(10));
-    arena_reset(gc.frame_arena);
+    gc.frame_arena = arena_reserve(MB(10));
 
     init_framebuffer(1920, 1080);
+
+    prof_init();
 
     gc.font = load_font_from_file("..\\Font\\Lato.ttf", 32.0f);
     gc.icon_font = load_font_from_file("..\\Font\\Icons.ttf", 32.0f);
 
-    if(!(gc.font && gc.icon_font))
-    {
+    if(!(gc.font && gc.icon_font)){
         return false;
     }
     
-    gc.ui_ctx = ui_new_ctx();
+    gc.ui_ctx = CHECK_PTR(ui_new_ctx());
+
+    if(!(gc.ui_ctx)){
+        return false;
+    }
     
-    gc.side_panel_x = 500;
-
-    todo_list_new("Default list");
-    todo_list_new("Hobbies");
-    todo_list_new("Work stuff");
-    todo_list_new("Programming");
-
-    prof_init();
-
     gc.running     = true;
     gc.resize      = true;
     gc.rescale     = true;
@@ -2653,22 +3081,29 @@ bool init_all(void)
     gc.dock        = false;
     gc.profile     = false;
     gc.changed     = true;
-
+    
     init_time();
-
-    gc.hand_cursor = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
-    gc.regular_cursor = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
-
+    
+    gc.hand_cursor    = CHECK_PTR(glfwCreateStandardCursor(GLFW_HAND_CURSOR));
+    gc.regular_cursor = CHECK_PTR(glfwCreateStandardCursor(GLFW_ARROW_CURSOR));
+    
     set_dark_mode(gc.window);
     set_window_icon("..\\Resources\\icon.png");
 
+    gc.side_panel_x = 0.3;
+
+    todo_list_new("Default list");
+    todo_list_new("Hobbies");
+    todo_list_new("Work stuff");
+    todo_list_new("Programming");
+    
     return true;
 }
 
 int main(void)
 {   
-    if(!init_all())
-    {
+    if(!init_all()){
+        fprintf(stderr, "Error : Failed to initialize application");
         exit(EXIT_FAILURE);
     }
 
@@ -2684,15 +3119,13 @@ int main(void)
             render_all();
         }
         
-        present_frame(&gc.draw_buffer);
-        
         PROFILE("Events")
         {
             poll_events();
         }
         
         cleanup_all();
-
+        present_frame(&gc.draw_buffer);
     }
     return 0;
 }

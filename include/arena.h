@@ -17,6 +17,12 @@ typedef struct arena_t arena_t;
  */
 extern arena_t* arena_new (void);
 
+/*  
+    Create a new arena with a default block of certain size 
+    and return a pointer to it.
+*/
+extern arena_t* arena_reserve(size_t nbytes);
+
 /* 
     Free the memory associated with the arena.
  */

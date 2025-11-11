@@ -30,8 +30,8 @@
 
 #define ArrayCount(x) ((sizeof(x))/(sizeof((x)[0])))
 
-#define IntFromPtr(p) (U64)((U8*)p - (U8*)0)
-#define PtrFromInt(n) (void*)((U8*)0 + (n))
+#define IntFromPtr(p) (u64)((u8*)p - (u8*)0)
+#define PtrFromInt(n) (void*)((u8*)0 + (n))
 
 #define Member(T,m) (((T*)0)->m)
 #define OffsetOfMember(T,m) IntFromPtr(&Member(T,m))
@@ -148,8 +148,8 @@ const char* enum_strings[] = {
     - end = ending value
     - t = progress from 0.0 to 1.0 (0% to 100%) 
  */
-#define LERP_F32(start, end, t)     ((f32)((start) + ((end) - (start)) * (t)))
-#define LERP_F64(start, end, t)     ((f64)((start) + ((end) - (start)) * (t)))
+#define LERP_F32(start, end, t)         ((f32)((start) + ((end) - (start)) * (t)))
+#define LERP_F64(start, end, t)         ((f64)((start) + ((end) - (start)) * (t)))
 
 /*
     value = LERP(a, b, t)
@@ -302,11 +302,6 @@ typedef struct mat4x4_t
 {
     f32 values[16];
 }mat4x4_t;
-
-typedef struct rect_t
-{
-    i32 x, y, w, h;
-}rect_t;
 
 typedef enum {
     EASE_LINEAR,

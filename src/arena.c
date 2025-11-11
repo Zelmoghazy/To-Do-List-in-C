@@ -91,6 +91,14 @@ arena_t* arena_new(void)
     return arena;
 }
 
+arena_t* arena_reserve(size_t nbytes)
+{
+    arena_t* arena = arena_new();
+    (void)ARENA_ALLOC(arena, nbytes);
+    arena_reset(arena);
+    return arena;
+}
+
 /*
     Deallocate all memory blocks and then frees the arena structure itself.
  */
