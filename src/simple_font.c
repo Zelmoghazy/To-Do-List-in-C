@@ -168,7 +168,7 @@ void render_text(image_view_t const *color_buf, rendered_text_t *text)
             if(*string == '\n')
             {
                 y += scaled_height;
-                x = 0;
+                x = text->pos.x;
             }
             else if (*string == '\t')
             {
@@ -178,6 +178,7 @@ void render_text(image_view_t const *color_buf, rendered_text_t *text)
             {
                 fprintf(stderr, "Unknown character!\n");
             }
+            string++;
             continue;
         }
 

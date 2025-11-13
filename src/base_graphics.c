@@ -74,29 +74,6 @@ void hsv_to_rgb(f32 h, f32 s, f32 v, f32 *r, f32 *g, f32 *b)
     }
 }
 
-/* 
-    ---Interleaved Gradient Noise---
-
-    f32 noise = gradient_noise((f32)x, (f32)y);
-    vec3f_t noise_offset = {
-        (1.0f / 255.0f) * noise - (0.5f / 255.0f),
-        (1.0f / 255.0f) * noise - (0.5f / 255.0f),
-        (1.0f / 255.0f) * noise - (0.5f / 255.0f)
-    };
-    color = vec3f_add(color, noise_offset);
- */
-f32 gradient_noise(f32 x, f32 y) 
-{
-    const f32 magic_x = 0.06711056f;
-    const f32 magic_y = 0.00583715f;
-    const f32 magic_z = 52.9829189f;
-    
-    f32 dot_product = x * magic_x + y * magic_y;
-    f32 fract_dot = dot_product - floorf(dot_product);
-    f32 result = magic_z * fract_dot;
-    return result - floorf(result);
-}
-
 color4_t color4_lerp(color4_t c1, color4_t c2, f32 t)
 {
     t = Clamp(0.0f, t, 1.0f);
@@ -129,6 +106,77 @@ color4_t dark(color4_t c)
 color4_t lite(color4_t c)
 {
     return average(c, COLOR_WHITE);
+}
+
+color4_t rgb_from_wavelength(f64 wave)
+{
+    f64 r = 0;
+    f64 g = 0;
+    f64 b = 0;
+
+    // Spectral color mapping
+    if (wave >= 380.0 && wave <= 440.0) {
+        r = -1.0 * (wave - 440.0) / (440.0 - 380.0);
+        b = 1.0;
+    } else if (wave >= 440.0 && wave <= 490.0) {
+        g = (wave - 440.0) / (490.0 - 440.0);
+        b = 1.0;
+    } else if (wave >= 490.0 && wave <= 510.0) {
+        g = 1.0;
+        b = -1.0 * (wave - 510.0) / (510.0 - 490.0);
+    } else if (wave >= 510.0 && wave <= 580.0) {
+        r = (wave - 510.0) / (580.0 - 510.0);
+        g = 1.0;
+    } else if (wave >= 580.0 && wave <= 645.0) {
+        r = 1.0;
+        g = -1.0 * (wave - 645.0) / (645.0 - 580.0);
+    } else if (wave >= 645.0 && wave <= 780.0) {
+        r = 1.0;
+    }
+
+    // Brightness adjustment
+    f64 s = 1.0;
+    if (wave > 700.0)
+        s = 0.3 + 0.7 * (780.0 - wave) / (780.0 - 700.0);
+    else if (wave <  420.0)
+        s = 0.3 + 0.7 * (wave - 380.0) / (420.0 - 380.0);
+
+    // Gamma correction
+    r = pow(r * s, 0.8);
+    g = pow(g * s, 0.8);
+    b = pow(b * s, 0.8);
+    
+    // Create and return color_t
+    color4_t color;
+    color.r = (u8)(r * 255);
+    color.g = (u8)(g * 255);
+    color.b = (u8)(b * 255);
+    color.a = 255;
+    
+    return color;
+}
+
+/* 
+    ---Interleaved Gradient Noise---
+
+    f32 noise = gradient_noise((f32)x, (f32)y);
+    vec3f_t noise_offset = {
+        (1.0f / 255.0f) * noise - (0.5f / 255.0f),
+        (1.0f / 255.0f) * noise - (0.5f / 255.0f),
+        (1.0f / 255.0f) * noise - (0.5f / 255.0f)
+    };
+    color = vec3f_add(color, noise_offset);
+ */
+f32 gradient_noise(f32 x, f32 y) 
+{
+    const f32 magic_x = 0.06711056f;
+    const f32 magic_y = 0.00583715f;
+    const f32 magic_z = 52.9829189f;
+    
+    f32 dot_product = x * magic_x + y * magic_y;
+    f32 fract_dot = dot_product - floorf(dot_product);
+    f32 result = magic_z * fract_dot;
+    return result - floorf(result);
 }
 
 /*

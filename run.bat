@@ -22,31 +22,34 @@ if "%1"=="rel" (
     echo Building the project...
     pushd .\build
     cl %CFLAGS% /O2 %INCLUDE_DIRS% %SRC% /link %LIBRARY_DIRS% %LIBRARIES% %L_FLAGS%
-    if %errorlevel% neq 0 (
-        echo Build failed!
-        popd
-        exit /b 1
+    if errorlevel 1 (
+        goto :build_failed
     )
     echo Build successful. Running...
     .\Main.exe
-    popd
-    exit /b 0
+    goto :build_success
 )
 
 if "%1"=="dbg" (
     echo Building the project with debugging symbols...
     pushd .\build
     cl %CFLAGS% /fsanitize=address %INCLUDE_DIRS% %SRC% /link %LIBRARY_DIRS% %LIBRARIES% %L_FLAGS%
-    if %errorlevel% neq 0 (
-        echo Debug build failed!
-        popd
-        exit /b 1
+    if errorlevel 1 (
+        goto :build_failed
     )
     echo Debug build successful. Launching debugger...
     start "" "raddbg.exe" .\Main.exe
-    popd
-    exit /b 0
+    goto :build_success
 )
 
 echo Unknown command: %1
 exit /b 1
+
+:build_failed
+echo Build failed!
+popd
+exit /b 1
+
+:build_success
+popd
+exit /b 0
