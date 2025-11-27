@@ -1,5 +1,5 @@
 #include "../include/util.h"
-#include "GLFW/glfw3.h"
+#include "../external/include/stb_ds.h"
 
 void print_spaces(const char* message, int spaces)
 {
@@ -99,7 +99,6 @@ void dump_memory(void *ptr, i32 size)
 }
 
 __declspec(thread) u32 g_seed;
-
 void fast_srand(u32 seed) 
 {
     g_seed = seed;
@@ -158,6 +157,12 @@ u64 arith_mod(u64 x, u64 y)
         return x % y;
 }
 
+static inline f32 smoothstep(f32 edge0, f32 edge1, f32 x) 
+{
+    f32 t = Clamp(0.0f, (x - edge0) / (edge1 - edge0), 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 f32 d_sqrt(f32 number)
 {
     i32 i;
@@ -172,11 +177,55 @@ f32 d_sqrt(f32 number)
     return number * y;
 }
 
-static inline f32 smoothstep(f32 edge0, f32 edge1, f32 x) 
+static f32 trig_values[] = 
+{ 
+    0.0000f,0.0175f,0.0349f,0.0523f,0.0698f,0.0872f,0.1045f,0.1219f,
+    0.1392f,0.1564f,0.1736f,0.1908f,0.2079f,0.2250f,0.2419f,0.2588f,
+    0.2756f,0.2924f,0.3090f,0.3256f,0.3420f,0.3584f,0.3746f,0.3907f,
+    0.4067f,0.4226f,0.4384f,0.4540f,0.4695f,0.4848f,0.5000f,0.5150f,
+    0.5299f,0.5446f,0.5592f,0.5736f,0.5878f,0.6018f,0.6157f,0.6293f,
+    0.6428f,0.6561f,0.6691f,0.6820f,0.6947f,0.7071f,0.7071f,0.7193f,
+    0.7314f,0.7431f,0.7547f,0.7660f,0.7771f,0.7880f,0.7986f,0.8090f,
+    0.8192f,0.8290f,0.8387f,0.8480f,0.8572f,0.8660f,0.8746f,0.8829f,
+    0.8910f,0.8988f,0.9063f,0.9135f,0.9205f,0.9272f,0.9336f,0.9397f,
+    0.9455f,0.9511f,0.9563f,0.9613f,0.9659f,0.9703f,0.9744f,0.9781f,
+    0.9816f,0.9848f,0.9877f,0.9903f,0.9925f,0.9945f,0.9962f,0.9976f,
+    0.9986f,0.9994f,0.9998f,1.0000f
+};
+
+f32 sine_deg(i32 x)
 {
-    f32 t = Clamp(0.0f, (x - edge0) / (edge1 - edge0), 1.0f);
-    return t * t * (3.0f - 2.0f * t);
+    x = x % 360;
+    if (x < 0) {
+        x += 360;
+    }
+    if (x == 0){
+        return 0;
+    }else if (x == 90){
+        return 1;
+    }else if (x == 180){
+        return 0;
+    }else if (x == 270){
+        return -1;
+    }
+
+    if(x > 270){
+        return - trig_values[360-x];
+    }else if(x>180){
+        return - trig_values[x-180];
+    }else if(x>90){
+        return trig_values[180-x];
+    }else{
+        return trig_values[x];
+    }
 }
+
+f32 cosine_deg(i32 x)
+{
+    return sine_deg(90-x);
+}
+
+/* -------------------- Math stuff -------------------- */
 
 vec2f_t vec2f(f32 x, f32 y)
 {
@@ -469,6 +518,120 @@ mat4x4_t mat4x4_transpose(mat4x4_t const *m)
     return res;
 }
 
+bool mat4x4_invert(mat4x4_t const *m, mat4x4_t *out)
+{
+    f32 wtmp[4][8];
+    f32 m0, m1, m2, m3, s;
+    f32 *r0, *r1, *r2, *r3;
+    
+    r0 = wtmp[0], r1 = wtmp[1], r2 = wtmp[2], r3 = wtmp[3];
+    
+    // Initialize augmented matrix [M | I]
+    r0[0] = MAT(m->values,0,0), r0[1] = MAT(m->values,0,1), 
+    r0[2] = MAT(m->values,0,2), r0[3] = MAT(m->values,0,3),
+    r0[4] = 1.0f, r0[5] = r0[6] = r0[7] = 0.0f;
+    
+    r1[0] = MAT(m->values,1,0), r1[1] = MAT(m->values,1,1),
+    r1[2] = MAT(m->values,1,2), r1[3] = MAT(m->values,1,3),
+    r1[5] = 1.0f, r1[4] = r1[6] = r1[7] = 0.0f;
+    
+    r2[0] = MAT(m->values,2,0), r2[1] = MAT(m->values,2,1),
+    r2[2] = MAT(m->values,2,2), r2[3] = MAT(m->values,2,3),
+    r2[6] = 1.0f, r2[4] = r2[5] = r2[7] = 0.0f;
+    
+    r3[0] = MAT(m->values,3,0), r3[1] = MAT(m->values,3,1),
+    r3[2] = MAT(m->values,3,2), r3[3] = MAT(m->values,3,3),
+    r3[7] = 1.0f, r3[4] = r3[5] = r3[6] = 0.0f;
+    
+    /* choose pivot - or die */
+    if (fabsf(r3[0])>fabsf(r2[0])) SWAP_ROWS(r3, r2);
+    if (fabsf(r2[0])>fabsf(r1[0])) SWAP_ROWS(r2, r1);
+    if (fabsf(r1[0])>fabsf(r0[0])) SWAP_ROWS(r1, r0);
+    if (0.0f == r0[0]) return false;
+    
+    /* eliminate first variable */
+    m1 = r1[0]/r0[0]; m2 = r2[0]/r0[0]; m3 = r3[0]/r0[0];
+    s = r0[1]; r1[1] -= m1*s; r2[1] -= m2*s; r3[1] -= m3*s;
+    s = r0[2]; r1[2] -= m1*s; r2[2] -= m2*s; r3[2] -= m3*s;
+    s = r0[3]; r1[3] -= m1*s; r2[3] -= m2*s; r3[3] -= m3*s;
+    s = r0[4];
+    if (s != 0.0f) { r1[4] -= m1*s; r2[4] -= m2*s; r3[4] -= m3*s; }
+    s = r0[5];
+    if (s != 0.0f) { r1[5] -= m1*s; r2[5] -= m2*s; r3[5] -= m3*s; }
+    s = r0[6];
+    if (s != 0.0f) { r1[6] -= m1*s; r2[6] -= m2*s; r3[6] -= m3*s; }
+    s = r0[7];
+    if (s != 0.0f) { r1[7] -= m1*s; r2[7] -= m2*s; r3[7] -= m3*s; }
+    
+    /* choose pivot - or die */
+    if (fabsf(r3[1])>fabsf(r2[1])) SWAP_ROWS(r3, r2);
+    if (fabsf(r2[1])>fabsf(r1[1])) SWAP_ROWS(r2, r1);
+    if (0.0f == r1[1]) return false;
+    
+    /* eliminate second variable */
+    m2 = r2[1]/r1[1]; m3 = r3[1]/r1[1];
+    r2[2] -= m2*r1[2]; r3[2] -= m3*r1[2];
+    r2[3] -= m2*r1[3]; r3[3] -= m3*r1[3];
+    s = r1[4];
+    if (0.0f != s) { r2[4] -= m2*s; r3[4] -= m3*s; }
+    s = r1[5];
+    if (0.0f != s) { r2[5] -= m2*s; r3[5] -= m3*s; }
+    s = r1[6];
+    if (0.0f != s) { r2[6] -= m2*s; r3[6] -= m3*s; }
+    s = r1[7];
+    if (0.0f != s) { r2[7] -= m2*s; r3[7] -= m3*s; }
+    
+    /* choose pivot - or die */
+    if (fabsf(r3[2])>fabsf(r2[2])) SWAP_ROWS(r3, r2);
+    if (0.0f == r2[2]) return false;
+    
+    /* eliminate third variable */
+    m3 = r3[2]/r2[2];
+    r3[3] -= m3*r2[3], r3[4] -= m3*r2[4],
+    r3[5] -= m3*r2[5], r3[6] -= m3*r2[6], r3[7] -= m3*r2[7];
+    
+    /* last check */
+    if (0.0f == r3[3]) return false;
+    
+    s = 1.0f/r3[3]; /* now back substitute row 3 */
+    r3[4] *= s; r3[5] *= s; r3[6] *= s; r3[7] *= s;
+    
+    m2 = r2[3]; /* now back substitute row 2 */
+    s = 1.0f/r2[2];
+    r2[4] = s*(r2[4] - r3[4]*m2), r2[5] = s*(r2[5] - r3[5]*m2),
+    r2[6] = s*(r2[6] - r3[6]*m2), r2[7] = s*(r2[7] - r3[7]*m2);
+    m1 = r1[3];
+    r1[4] -= r3[4]*m1, r1[5] -= r3[5]*m1,
+    r1[6] -= r3[6]*m1, r1[7] -= r3[7]*m1;
+    m0 = r0[3];
+    r0[4] -= r3[4]*m0, r0[5] -= r3[5]*m0,
+    r0[6] -= r3[6]*m0, r0[7] -= r3[7]*m0;
+    
+    m1 = r1[2]; /* now back substitute row 1 */
+    s = 1.0f/r1[1];
+    r1[4] = s*(r1[4] - r2[4]*m1), r1[5] = s*(r1[5] - r2[5]*m1),
+    r1[6] = s*(r1[6] - r2[6]*m1), r1[7] = s*(r1[7] - r2[7]*m1);
+    m0 = r0[2];
+    r0[4] -= r2[4]*m0, r0[5] -= r2[5]*m0,
+    r0[6] -= r2[6]*m0, r0[7] -= r2[7]*m0;
+    
+    m0 = r0[1]; /* now back substitute row 0 */
+    s = 1.0f/r0[0];
+    r0[4] = s*(r0[4] - r1[4]*m0), r0[5] = s*(r0[5] - r1[5]*m0),
+    r0[6] = s*(r0[6] - r1[6]*m0), r0[7] = s*(r0[7] - r1[7]*m0);
+    
+    MAT(out->values,0,0) = r0[4]; MAT(out->values,0,1) = r0[5],
+    MAT(out->values,0,2) = r0[6]; MAT(out->values,0,3) = r0[7],
+    MAT(out->values,1,0) = r1[4]; MAT(out->values,1,1) = r1[5],
+    MAT(out->values,1,2) = r1[6]; MAT(out->values,1,3) = r1[7],
+    MAT(out->values,2,0) = r2[4]; MAT(out->values,2,1) = r2[5],
+    MAT(out->values,2,2) = r2[6]; MAT(out->values,2,3) = r2[7],
+    MAT(out->values,3,0) = r3[4]; MAT(out->values,3,1) = r3[5],
+    MAT(out->values,3,2) = r3[6]; MAT(out->values,3,3) = r3[7];
+    
+    return true;
+}
+
 mat4x4_t mat4x4_mult_simd(mat4x4_t const *m, mat4x4_t const *n) 
 {
     mat4x4_t res;
@@ -566,6 +729,11 @@ mat4x4_t mat_translate(vec3f_t s)
     };
 }
 
+/*
+    [cos  -sin  0]
+    [sin   cos  0]
+    [0     0    1]
+ */
 mat4x4_t mat_rotate_xy(f32 angle)
 {
     f32 cos = cosf(angle);
@@ -579,6 +747,11 @@ mat4x4_t mat_rotate_xy(f32 angle)
     };
 }
 
+/*
+    [1.f, 0.f,  0.f]
+    [0.f, cos, -sin]
+    [0.f, sin,  cos]
+ */
 mat4x4_t mat_rotate_yz(f32 angle)
 {
     f32 cos = cosf(angle);
@@ -592,6 +765,11 @@ mat4x4_t mat_rotate_yz(f32 angle)
     };
 }
 
+/*
+    [cos,  0.f, sin]
+    [0.f,  1.f, 0.f]
+    [-sin, 0.f, cos]
+ */
 mat4x4_t mat_rotate_zx(f32 angle)
 {
     f32 cos = cosf(angle);
@@ -605,51 +783,378 @@ mat4x4_t mat_rotate_zx(f32 angle)
     };
 }
 
-float trig_values[] = { 
-    0.0000f,0.0175f,0.0349f,0.0523f,0.0698f,0.0872f,0.1045f,0.1219f,
-    0.1392f,0.1564f,0.1736f,0.1908f,0.2079f,0.2250f,0.2419f,0.2588f,
-    0.2756f,0.2924f,0.3090f,0.3256f,0.3420f,0.3584f,0.3746f,0.3907f,
-    0.4067f,0.4226f,0.4384f,0.4540f,0.4695f,0.4848f,0.5000f,0.5150f,
-    0.5299f,0.5446f,0.5592f,0.5736f,0.5878f,0.6018f,0.6157f,0.6293f,
-    0.6428f,0.6561f,0.6691f,0.6820f,0.6947f,0.7071f,0.7071f,0.7193f,
-    0.7314f,0.7431f,0.7547f,0.7660f,0.7771f,0.7880f,0.7986f,0.8090f,
-    0.8192f,0.8290f,0.8387f,0.8480f,0.8572f,0.8660f,0.8746f,0.8829f,
-    0.8910f,0.8988f,0.9063f,0.9135f,0.9205f,0.9272f,0.9336f,0.9397f,
-    0.9455f,0.9511f,0.9563f,0.9613f,0.9659f,0.9703f,0.9744f,0.9781f,
-    0.9816f,0.9848f,0.9877f,0.9903f,0.9925f,0.9945f,0.9962f,0.9976f,
-    0.9986f,0.9994f,0.9998f,1.0000f
-};
-
-float sine(int x)
+vec3f_t mat_direction_from_angles(f32 yaw, f32 pitch)
 {
-    x = x % 360;
-    if (x < 0) {
-        x += 360;
-    }
-    if (x == 0){
-        return 0;
-    }else if (x == 90){
-        return 1;
-    }else if (x == 180){
-        return 0;
-    }else if (x == 270){
-        return -1;
-    }
-
-    if(x > 270){
-        return - trig_values[360-x];
-    }else if(x>180){
-        return - trig_values[x-180];
-    }else if(x>90){
-        return trig_values[180-x];
-    }else{
-        return trig_values[x];
-    }
+    vec3f_t direction;
+    direction.x = cosf(yaw) * cosf(pitch);
+    direction.y = sinf(pitch);
+    direction.z = sinf(yaw) * cosf(pitch);
+    
+    return vec3f_normalize(direction);
 }
 
-float cosine(int x){
-    return sine(90-x);
+mat4x4_t mat_rotation_from_direction(vec3f_t front, vec3f_t world_up)
+{
+    vec3f_t right = vec3f_normalize(vec3f_cross(front, world_up));
+    vec3f_t up = vec3f_cross(right, front);
+    
+    return (mat4x4_t){
+        right.x,  right.y,  right.z,  0.f,
+        up.x,     up.y,     up.z,     0.f,
+        -front.x, -front.y, -front.z, 0.f,
+        0.f,      0.f,      0.f,      1.f
+    };
 }
+
+mat4x4_t mat_rotation_from_angles(f32 yaw, f32 pitch)
+{
+    vec3f_t front = mat_direction_from_angles(yaw, pitch);
+    vec3f_t world_up = {0.f, 1.f, 0.f};
+    return mat_rotation_from_direction(front, world_up);
+}
+
+mat4x4_t mat_look_at(vec3f_t eye, vec3f_t center, vec3f_t up)
+{
+    vec3f_t f = vec3f_normalize(vec3f_sub(center, eye));
+    vec3f_t r = vec3f_normalize(vec3f_cross(f, up));
+    vec3f_t u = vec3f_cross(r, f);
+    
+    return (mat4x4_t){
+        r.x,  r.y,  r.z,  -vec3f_dot(r, eye),
+        u.x,  u.y,  u.z,  -vec3f_dot(u, eye),
+       -f.x, -f.y, -f.z,   vec3f_dot(f, eye),
+        0.f,  0.f,  0.f,   1.f,
+    };
+}
+
+// Convert rotation matrix to quaternion
+quat_t quat_from_mat4x4(mat4x4_t const *mat)
+{
+    quat_t quat;
+    f32 tr, s, q[4];
+    i32 i, j, k;
+    i32 nxt[3] = {1, 2, 0};
+    
+    // Calculate trace
+    tr = MAT(mat->values, 0, 0) + MAT(mat->values, 1, 1) + MAT(mat->values, 2, 2);
+    
+    // Check the diagonal
+    if (tr > 0.0f) 
+    {
+        s = sqrtf(tr + 1.0f);
+        quat.w = s * 0.5f;
+        s = 0.5f / s;
+        
+        quat.x = (MAT(mat->values, 1, 2) - MAT(mat->values, 2, 1)) * s;
+        quat.y = (MAT(mat->values, 2, 0) - MAT(mat->values, 0, 2)) * s;
+        quat.z = (MAT(mat->values, 0, 1) - MAT(mat->values, 1, 0)) * s;
+    }
+    else 
+    {
+        // Diagonal is negative - find largest diagonal element
+        i = 0;
+        if (MAT(mat->values, 1, 1) > MAT(mat->values, 0, 0)) i = 1;
+        if (MAT(mat->values, 2, 2) > MAT(mat->values, i, i)) i = 2;
+        
+        j = nxt[i];
+        k = nxt[j];
+        
+        s = sqrtf((MAT(mat->values, i, i) - (MAT(mat->values, j, j) + MAT(mat->values, k, k))) + 1.0f);
+        
+        q[i] = s * 0.5f;
+        
+        if (s != 0.0f) s = 0.5f / s;
+        
+        q[3] = (MAT(mat->values, j, k) - MAT(mat->values, k, j)) * s;
+        q[j] = (MAT(mat->values, i, j) + MAT(mat->values, j, i)) * s;
+        q[k] = (MAT(mat->values, i, k) + MAT(mat->values, k, i)) * s;
+        
+        quat.x = q[0];
+        quat.y = q[1];
+        quat.z = q[2];
+        quat.w = q[3];
+    }
+    
+    return quat;
+}
+
+// Convert quaternion to rotation matrix
+mat4x4_t quat_to_mat4x4(quat_t const *quat)
+{
+    mat4x4_t m;
+    
+    // Calculate coefficients
+    f32 x2 = quat->x + quat->x;
+    f32 y2 = quat->y + quat->y;
+    f32 z2 = quat->z + quat->z;
+    
+    f32 xx = quat->x * x2;
+    f32 xy = quat->x * y2;
+    f32 xz = quat->x * z2;
+    f32 yy = quat->y * y2;
+    f32 yz = quat->y * z2;
+    f32 zz = quat->z * z2;
+    f32 wx = quat->w * x2;
+    f32 wy = quat->w * y2;
+    f32 wz = quat->w * z2;
+    
+    MAT(m.values, 0, 0) = 1.0f - (yy + zz);
+    MAT(m.values, 0, 1) = xy - wz;
+    MAT(m.values, 0, 2) = xz + wy;
+    MAT(m.values, 0, 3) = 0.0f;
+    
+    MAT(m.values, 1, 0) = xy + wz;
+    MAT(m.values, 1, 1) = 1.0f - (xx + zz);
+    MAT(m.values, 1, 2) = yz - wx;
+    MAT(m.values, 1, 3) = 0.0f;
+    
+    MAT(m.values, 2, 0) = xz - wy;
+    MAT(m.values, 2, 1) = yz + wx;
+    MAT(m.values, 2, 2) = 1.0f - (xx + yy);
+    MAT(m.values, 2, 3) = 0.0f;
+    
+    MAT(m.values, 3, 0) = 0.0f;
+    MAT(m.values, 3, 1) = 0.0f;
+    MAT(m.values, 3, 2) = 0.0f;
+    MAT(m.values, 3, 3) = 1.0f;
+    
+    return m;
+}
+
+/* 
+    Computes the product of two quaternions
+    - Quaternion multiplication is not commutative
+ */
+ quat_t quat_mult(quat_t const *q1, quat_t const *q2)
+{
+    vec3f_t v1 = {q1->x, q1->y, q1->z};
+    vec3f_t v2 = {q2->x, q2->y, q2->z};
+    
+    vec3f_t t1 = vec3f_scale(v1, q2->w);
+    vec3f_t t2 = vec3f_scale(v2, q1->w);
+    vec3f_t t3 = vec3f_cross(v1, v2);
+    
+    vec3f_t result_vec = vec3f_add(vec3f_add(t1, t2), t3);
+    
+    return (quat_t){
+        .x = result_vec.x,
+        .y = result_vec.y,
+        .z = result_vec.z,
+        .w = q1->w * q2->w - vec3f_dot(v1, v2)
+    };
+}
+
+/* 
+    Purpose: Computes the product of two quaternions
+*/
+quat_t quat_mult2(quat_t *quat1, quat_t *quat2)
+{
+    quat_t tmp;
+    tmp.x =		quat2->w * quat1->x + quat2->x * quat1->w +
+				quat2->y * quat1->z - quat2->z * quat1->y;
+    tmp.y  =	quat2->w * quat1->y + quat2->y * quat1->w +
+				quat2->z * quat1->x - quat2->x * quat1->z;
+    tmp.z  =	quat2->w * quat1->z + quat2->z * quat1->w +
+				quat2->x * quat1->y - quat2->y * quat1->x;
+    tmp.w  =	quat2->w * quat1->w - quat2->x * quat1->x -
+				quat2->y * quat1->y - quat2->z * quat1->z;
+
+    return tmp;
+}
+
+/* 
+    Purpose: Normalize a Quaternion
+    Quaternions must follow the rules of x^2 + y^2 + z^2 + w^2 = 1
+    				This function insures this 
+*/
+void quat_normalize(quat_t *quat)
+{
+	float magnitude;
+
+	magnitude = (quat->x * quat->x) + 
+				(quat->y * quat->y) + 
+				(quat->z * quat->z) + 
+				(quat->w * quat->w);
+
+	quat->x = quat->x / magnitude;
+	quat->y = quat->y / magnitude;
+	quat->z = quat->z / magnitude;
+	quat->w = quat->w / magnitude;
+}
+
+/*
+    q = q_yaw * q_pitch * q_roll where:
+        qroll = [cos (ψ/2), (sin(ψ/2), 0, 0)]
+        qpitch = [cos (θ/2), (0, sin(θ/2), 0)]
+        qyaw = [cos(φ /2), (0, 0, sin(φ /2)]
+
+        Purpose:    Convert a set of Euler angles to a Quaternion
+        Arguments:	A rotation set of 3 angles, a quaternion to set
+        Discussion: As the order of rotations is important I am
+        				using the Quantum Mechanics convention of (X,Y,Z)
+        				a Yaw-Pitch-Roll (Y,X,Z) system would have to be
+        				adjusted.  It is more efficient this way though.
+    
+        Euler (x = ψ, y = θ, z = φ)
+        Qx = [(sin(ψ/2),0,0), cos(ψ/2)]
+        Qy = [(0,sin(θ/2),0), cos(θ/2)]
+        Qz = [(0,0, sin(φ/2)), cos(φ/2)]
+*/
+void quat_from_euler(vec3f_t *rot, quat_t *quat)
+{
+	float rx,ry,rz,tx,ty,tz,cx,cy,cz,sx,sy,sz,cc,cs,sc,ss;
+
+	// FIRST STEP, CONVERT ANGLES TO RADIANS
+	rx =  (rot->x * (float)M_PI) / (360 / 2);
+	ry =  (rot->y * (float)M_PI) / (360 / 2);
+	rz =  (rot->z * (float)M_PI) / (360 / 2);
+
+	// GET THE HALF ANGLES
+	tx = rx * (float)0.5;
+	ty = ry * (float)0.5;
+	tz = rz * (float)0.5;
+	cx = (float)cos(tx);
+	cy = (float)cos(ty);
+	cz = (float)cos(tz);
+	sx = (float)sin(tx);
+	sy = (float)sin(ty);
+	sz = (float)sin(tz);
+
+	cc = cx * cz;
+	cs = cx * sz;
+	sc = sx * cz;
+	ss = sx * sz;
+
+	quat->x = (cy * sc) - (sy * cs);
+	quat->y = (cy * ss) + (sy * cc);
+	quat->z = (cy * cs) - (sy * sc);
+	quat->w = (cy * cc) + (sy * ss);
+
+	// PROBABLY NOT NECESSARY IN MOST CASES
+	quat_normalize(quat);
+}
+
+/* 
+    Purpose:    Convert a set of Euler angles to a Quaternion
+    Discussion: This is a second variation.  It creates a
+			Series of quaternions and multiplies them together
+			It would be easier to extend this for other rotation orders 
+*/
+
+void quat_from_euler2(vec3f_t *rot, quat_t *quat)
+{
+	float rx,ry,rz,ti,tj,tk;
+	quat_t qx,qy,qz,qf;
+
+	// FIRST STEP, CONVERT ANGLES TO RADIANS
+	rx =  (rot->x * (float)M_PI) / (360 / 2);
+	ry =  (rot->y * (float)M_PI) / (360 / 2);
+	rz =  (rot->z * (float)M_PI) / (360 / 2);
+	// GET THE HALF ANGLES
+	ti = rx * (float)0.5;
+	tj = ry * (float)0.5;
+	tk = rz * (float)0.5;
+
+	qx.x = (float)sin(ti); qx.y = 0.0; qx.z = 0.0; qx.w = (float)cos(ti);
+	qy.x = 0.0; qy.y = (float)sin(tj); qy.z = 0.0; qy.w = (float)cos(tj);
+	qz.x = 0.0; qz.y = 0.0; qz.z = (float)sin(tk); qz.w = (float)cos(tk);
+
+	qf = quat_mult(&qx,&qy);
+	qf = quat_mult(&qf,&qz);
+
+// ANOTHER TEST VARIATION
+//	MultQuaternions2(&qx,&qy,&qf);
+//	MultQuaternions2(&qf,&qz,&qf);
+
+	// INSURE THE QUATERNION IS NORMALIZED
+	// PROBABLY NOT NECESSARY IN MOST CASES
+	quat_normalize(&qf);
+
+	quat->x = qf.x;
+	quat->y = qf.y;
+	quat->z = qf.z;
+	quat->w = qf.w;
+
+}
+
+/* 
+    Purpose: Convert a Quaternion to Axis Angle representation
+    q = cos(φ/2) + x sin(φ/2)i + y sin(φ/2)j + z sin(φ/2)k
+    φ = acos(Qw)*2
+    x = Qx/sin(φ/2)
+    y = Qy/sin(φ/2)
+    z = Qz/sin(φ/2)
+ */
+void quat_to_axis_angle(quat_t *quat, quat_t *axisAngle)
+{
+	float scale,tw;
+
+	tw = (float)acos(quat->w) * 2;
+	scale = (float)sin(tw / 2.0);
+
+	axisAngle->x = quat->x / scale;
+	axisAngle->y = quat->y / scale;
+	axisAngle->z = quat->z / scale;
+
+	axisAngle->w = (tw * (360 / 2)) / (float)M_PI;
+}
+
+#define DELTA	0.0001		// DIFFERENCE AT WHICH TO LERP INSTEAD OF SLERP
+
+/*
+    Purpose:		Spherical Linear Interpolation Between two Quaternions
+
+    SLERP(p,q,t) = {psin((1-t)θ) + qsin(tθ)} / {sin(θ)}
+    where pq = cos(θ) and parameter t goes from 0 to 1
+*/
+void quat_slerp(quat_t *quat1, quat_t *quat2, float slerp, quat_t *result)
+{
+	double omega,cosom,sinom,scale0,scale1;
+	// USE THE DOT PRODUCT TO GET THE COSINE OF THE ANGLE BETWEEN THE
+	// QUATERNIONS
+	cosom = quat1->x * quat2->x + 
+			quat1->y * quat2->y + 
+			quat1->z * quat2->z + 
+			quat1->w * quat2->w; 
+
+	// CHECK A COUPLE OF SPECIAL CASES. 
+	// MAKE SURE THE TWO QUATERNIONS ARE NOT EXACTLY OPPOSITE? (WITHIN A LITTLE SLOP)
+	if ((1.0 + cosom) > DELTA)
+	{
+		// ARE THEY MORE THAN A LITTLE BIT DIFFERENT? AVOID A DIVIDED BY ZERO AND LERP IF NOT
+		if ((1.0 - cosom) > DELTA) {
+			// YES, DO A SLERP
+			omega = acos(cosom);
+			sinom = sin(omega);
+			scale0 = sin((1.0 - slerp) * omega) / sinom;
+			scale1 = sin(slerp * omega) / sinom;
+		} else {
+			// NOT A VERY BIG DIFFERENCE, DO A LERP
+			scale0 = 1.0 - slerp;
+			scale1 = slerp;
+		}
+		result->x = scale0 * quat1->x + scale1 * quat2->x;
+		result->y = scale0 * quat1->y + scale1 * quat2->y;
+		result->z = scale0 * quat1->z + scale1 * quat2->z;
+		result->w = scale0 * quat1->w + scale1 * quat2->w;
+	} else {
+		// THE QUATERNIONS ARE NEARLY OPPOSITE SO TO AVOID A DIVIDED BY ZERO ERROR
+		// CALCULATE A PERPENDICULAR QUATERNION AND SLERP THAT DIRECTION
+		result->x = -quat2->y;
+		result->y = quat2->x;
+		result->z = -quat2->w;
+		result->w = quat2->z;
+		scale0 = sin((1.0 - slerp) * (float)M_PI_2);
+		scale1 = sin(slerp * (float)M_PI_2);
+		result->x = scale0 * quat1->x + scale1 * result->x;
+		result->y = scale0 * quat1->y + scale1 * result->y;
+		result->z = scale0 * quat1->z + scale1 * result->z;
+		result->w = scale0 * quat1->w + scale1 * result->w;
+	}
+
+}
+
+/* -------------------- Animation stuff -------------------- */
 
 animation_t animation_items[ANIMATION_MAX_ITEMS];
 i32 animation_item_count;
@@ -806,6 +1311,8 @@ void animation_pingpong(u64 id, f32 start, f32 target, f32 duration, easing_type
     }
 }
 
+/* -------------------- Timing stuff -------------------- */
+
 f64 get_time_difference(void *last_time) 
 {
     f64 dt = 0.0;
@@ -839,32 +1346,16 @@ void get_time(void *time)
     #endif
 }
 
-thread_handle_t create_thread(thread_func_t func, thread_func_param_t data)
+const char* get_file_extension(const char *filepath)
 {
-    #ifdef _WIN32
-        return CreateThread(NULL,  // security attribute -no idea- NULL means default 
-                             0,    // stack size zero means default size 
-                             func, // pointer to the function to be executed by the thread
-                             data, // pointer to the params passed to the thread
-                              0,   // run immediately
-                              NULL // dont return identifier
-                            );
-    #else
-        pthread_t thread;
-        pthread_create(&thread, NULL, func, data);
-        return thread;
-    #endif
+    const char* dot = strrchr(filepath, '.');
+    if(!dot){
+        return NULL;
+    }
+    return dot+1;
 }
 
-void join_thread(thread_handle_t thread) 
-{
-    #ifdef _WIN32
-        WaitForSingleObject(thread, INFINITE);
-        CloseHandle(thread);
-    #else
-        pthread_join(thread, NULL);
-    #endif
-}
+/* -------------------- Multithreading stuff -------------------- */
 
 int get_core_count(void) 
 {
@@ -877,11 +1368,542 @@ int get_core_count(void)
     #endif
 }
 
-const char* get_file_extension(const char *filepath)
+thread_handle_t create_thread(thread_func_t func, thread_func_param_t data)
 {
-    const char* dot = strrchr(filepath, '.');
-    if(!dot){
-        return NULL;
+    #ifdef _WIN32
+        return CreateThread(NULL,  // security attribute -no idea- NULL means default 
+                            0,     // stack size zero means default size 
+                            func,  // pointer to the function to be executed by the thread
+                            data,  // pointer to the params passed to the thread
+                            0,     // run immediately
+                            NULL); // dont return identifier
+    #else
+        pthread_t thread;
+        pthread_create(&thread, NULL, func, data);
+        return thread;
+    #endif
+}
+
+void join_thread(thread_handle_t thread) 
+{
+    #ifdef _WIN32
+        WaitForSingleObject(thread, INFINITE);  // return only when thread is signaled
+        CloseHandle(thread);
+    #else
+        pthread_join(thread, NULL);
+    #endif
+}
+
+void mutex_init(mutex_handle_t* mutex)
+{
+    #ifdef _WIN32
+        InitializeCriticalSection(mutex);
+    #else
+        pthread_mutex_init(mutex, NULL);
+    #endif
+}
+
+void mutex_destroy(mutex_handle_t* mutex)
+{
+    #ifdef _WIN32
+        DeleteCriticalSection(mutex);
+    #else
+        pthread_mutex_destroy(mutex);
+    #endif
+}
+
+void mutex_lock(mutex_handle_t* mutex)
+{
+    #ifdef _WIN32
+        EnterCriticalSection(mutex);
+    #else
+        pthread_mutex_lock(mutex);
+    #endif
+}
+
+void mutex_unlock(mutex_handle_t* mutex)
+{
+    #ifdef _WIN32
+        LeaveCriticalSection(mutex);
+    #else
+        pthread_mutex_unlock(mutex);
+    #endif
+}
+
+void cond_init(cond_handle_t* cond)
+{
+    #ifdef _WIN32
+        InitializeConditionVariable(cond);
+    #else
+        pthread_cond_init(cond, NULL);
+    #endif
+}
+
+void cond_destroy(cond_handle_t* cond)
+{
+    #ifdef _WIN32
+        (void) cond; // no cleanup ?
+    #else
+        pthread_cond_destroy(cond);
+    #endif
+}
+
+void cond_wait(cond_handle_t* cond, mutex_handle_t* mutex)
+{
+    #ifdef _WIN32
+        SleepConditionVariableCS(cond, mutex, INFINITE);
+    #else
+        pthread_cond_wait(cond, mutex);
+    #endif
+}
+
+void cond_signal(cond_handle_t* cond)
+{
+    #ifdef _WIN32
+        WakeConditionVariable(cond);
+    #else
+        pthread_cond_signal(cond);
+    #endif
+}
+
+void cond_broadcast(cond_handle_t* cond)
+{
+    #ifdef _WIN32
+        /* 
+            The WakeAllConditionVariable wakes all waiting threads
+            while the WakeConditionVariable wakes only a single thread. 
+        */
+        WakeAllConditionVariable(cond);
+    #else
+        pthread_cond_broadcast(cond);
+    #endif
+}
+
+void event_create(event_handle *event)
+{
+#ifdef _WIN32
+    event = CreateEvent(NULL, FALSE, FALSE, NULL);
+#else
+    pthread_mutex_init(event->mutex, NULL);
+    pthread_cond_init(&event->cond, NULL);
+    event->signaled = false;
+#endif
+}
+
+void event_destroy(event_handle *event)
+{
+#ifdef _WIN32    
+    if (event != NULL) {
+        CloseHandle((HANDLE)event);
     }
-    return dot+1;
+#else
+    pthread_cond_destroy(&event->cond);
+    pthread_mutex_destroy(&event->mutex);
+#endif
+}
+
+bool event_wait(event_handle *event)
+{
+#ifdef _WIN32
+    if (event == NULL) {
+        return FALSE;
+    }
+    DWORD result = WaitForSingleObject((HANDLE)event, INFINITE);
+    return result == WAIT_OBJECT_0;
+#else
+    if (event == NULL) {
+        return false;
+    }
+    
+    event_t *e = (event_t *)event;
+    pthread_mutex_lock(&e->mutex);
+    
+    while (!e->signaled) {
+        pthread_cond_wait(&e->cond, &e->mutex);
+    }
+    
+    e->signaled = false;  // Auto-reset behavior
+    pthread_mutex_unlock(&e->mutex);
+    
+    return true;
+#endif
+}
+
+bool event_activate(void *event)
+{
+#ifdef _WIN32
+    if (event == NULL) {
+        return FALSE;
+    }
+    return SetEvent((HANDLE)event) != 0;
+#else
+    if (event == NULL) {
+        return false;
+    }
+    
+    pthread_mutex_lock(&event->mutex);
+    event->signaled = true;
+    pthread_cond_signal(&event->cond);
+    pthread_mutex_unlock(&event->mutex);
+    
+    return true;
+#endif
+}
+
+thread_func_ret_t thread_loop(thread_func_param_t param)
+{
+    thread_pool_t* pool = (thread_pool_t*)param;
+
+    job_t job = {0};
+
+    while (true) 
+    {
+        mutex_lock(&pool->queue_mutex);
+        {
+            while (arrlen(pool->jobs) == 0 && !pool->should_terminate) 
+            {
+                cond_wait(&pool->mutex_condition, &pool->queue_mutex);
+            }
+            
+            if (pool->should_terminate) 
+            {
+                mutex_unlock(&pool->queue_mutex);
+                return 0;
+            }
+            job = pool->jobs[0];
+            arrdel(pool->jobs, 0);
+        }
+        mutex_unlock(&pool->queue_mutex);
+        
+        job.func(job.data);
+    }
+    
+    return 0;
+}
+
+thread_pool_t* threadpool_create(void)
+{
+    thread_pool_t* pool = (thread_pool_t*)malloc(sizeof(thread_pool_t));
+    if (!pool) return NULL;
+    
+    pool->threads = NULL;  
+    pool->jobs = NULL;     
+    pool->should_terminate = false;
+    
+    mutex_init(&pool->queue_mutex);
+    cond_init(&pool->mutex_condition);
+    
+    uint32_t num_threads = get_core_count();
+    
+    for (uint32_t i = 0; i < num_threads; ++i) {
+        thread_handle_t thread = create_thread(thread_loop, (thread_func_param_t)pool);
+        arrput(pool->threads, thread);
+    }
+    
+    return pool;
+}
+
+void threadpool_destroy(thread_pool_t* pool)
+{
+    if (!pool) return;
+    
+    mutex_lock(&pool->queue_mutex);
+    {
+        pool->should_terminate = true;
+    }
+    mutex_unlock(&pool->queue_mutex);
+    
+    cond_broadcast(&pool->mutex_condition);
+    
+    for (int i = 0; i < arrlen(pool->threads); ++i) {
+        join_thread(pool->threads[i]);
+    }
+    
+    arrfree(pool->threads);
+    arrfree(pool->jobs);
+    
+    mutex_destroy(&pool->queue_mutex);
+    cond_destroy(&pool->mutex_condition);
+    
+    free(pool);
+}
+
+void threadpool_queue_job(thread_pool_t* pool, job_func_t func, void* data)
+{
+    job_t job = { .func = func, .data = data };
+    
+    mutex_lock(&pool->queue_mutex);
+    {
+        arrput(pool->jobs, job);
+    }
+    mutex_unlock(&pool->queue_mutex);
+    
+    cond_signal(&pool->mutex_condition);
+}
+
+bool threadpool_busy(thread_pool_t* pool)
+{
+    bool busy = false;
+    
+    mutex_lock(&pool->queue_mutex);
+    {
+        bool busy = (arrlen(pool->jobs) > 0);
+    }
+    mutex_unlock(&pool->queue_mutex);
+    
+    return busy;
+}
+
+int set_non_blocking(pipe_handle fd)
+{
+    #ifdef _WIN32
+        return 0;
+    #else
+        int flags = fcntl(fd, F_GETFL, 0);
+        if(flags == -1) return -1;
+        return fcntl(fd, F_SETFL, flags|O_NONBLOCK);
+    #endif
+}
+
+int spawn_process(process_t *proc, const char *command)
+{
+#ifdef _WIN32
+    pipe_handle hReadPipe, hWritePipe;
+
+    SECURITY_ATTRIBUTES sa;
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+
+    char cmdline[512];
+    
+    ZeroMemory(&sa, sizeof(sa));
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+    
+    /* Anonymous Pipe */
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) 
+    {
+        fprintf(stderr, "CreatePipe failed: %lu\n", GetLastError());
+        return -1;
+    }
+    
+    /*
+        In Win32, child processes do not automatically inherit 
+        all handles from the parent process like linux 
+     */
+    if (!SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0)) 
+    {
+        fprintf(stderr, "SetHandleInformation failed: %lu\n", GetLastError());
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return -1;
+    }
+    
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(STARTUPINFO);
+    si.hStdError = hWritePipe;
+    si.hStdOutput = hWritePipe;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    
+    ZeroMemory(&pi, sizeof(pi));
+    
+    snprintf(cmdline, sizeof(cmdline), "cmd.exe /c %s", command);
+    
+    if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) 
+    {
+        fprintf(stderr, "CreateProcess failed: %lu\n", GetLastError());
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return -1;
+    }
+    
+    CloseHandle(hWritePipe);
+    CloseHandle(pi.hThread);
+    
+    proc->pid = pi.dwProcessId;
+    proc->pipe_fd = hReadPipe;
+    proc->hProcess = pi.hProcess;
+    strncpy(proc->cmd, command, sizeof(proc->cmd) - 1);
+    proc->cmd[sizeof(proc->cmd) - 1] = '\0';
+    proc->active = 1;
+    
+    return 0;
+#else
+    pipe_handle fildes[2]; // refer to the open file descriptions for the read and write ends of the pipe
+    int status;
+
+    status = pipe(fildes);
+    if(status == -1)
+    {
+        perror("pipe");
+        return -1;
+    }
+
+    pid_t pid = fork();
+
+    switch (pid) 
+    {
+        case -1: /* Handle error */
+            perror("fork");
+            close(fildes[0]);                     
+            close(fildes[1]);       
+            return -1;              
+            break;
+
+        case 0:  /* Child - writes to the pipe */
+            close(fildes[0]);    // read end is unused we want to read the child output 
+
+            // redirect stdout and stderr
+            if (dup2(fildes[1], STDOUT_FILENO) == -1) {
+                perror("dup2");
+            }
+
+            if (dup2(fildes[1], STDERR_FILENO) == -1) {
+                perror("dup2");
+            }
+
+            close(fildes[1]);                     /* Finished with pipe */
+
+            // replaces the current process image with a new process image
+            execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+
+            perror("execl");
+
+            exit(1);
+
+        default:  /* Parent - reads from the pipe */
+            close(fildes[1]);                       /* Write end unused we read from child processes */
+
+            if (set_non_blocking(fildes[0]) == -1)
+            {
+                perror("set_nonblocking");
+                close(fildes[0]);
+                return -1;
+            }
+            proc->pid = pid;
+            proc->pipe_fd = fildes[0];
+
+            strncpy(proc->cmd, command, sizeof(proc->cmd) - 1);
+            proc->cmd[sizeof(proc->cmd) - 1] = '\0';
+            proc->active = 1;
+            break;
+    }
+    return 0;
+#endif
+}
+
+#define BUFFER_SIZE 1024
+
+void check_process_output(process_t *proc) 
+{
+    char buffer[BUFFER_SIZE];
+
+#ifdef _WIN32
+    DWORD bytes_read;
+    DWORD bytes_avail;
+    
+    while (PeekNamedPipe(proc->pipe_fd, NULL, 0, NULL, &bytes_avail, NULL) && bytes_avail > 0) 
+    {
+        DWORD to_read = (bytes_avail < sizeof(buffer) - 1) 
+                        ? bytes_avail 
+                        : sizeof(buffer) - 1;
+        
+        if (ReadFile(proc->pipe_fd, buffer, to_read, &bytes_read, NULL)) 
+        {
+            if (bytes_read > 0) {
+                buffer[bytes_read] = '\0';
+                printf("[PID %lu - %s]: %s", proc->pid, proc->cmd, buffer);
+                fflush(stdout);
+            }
+        } 
+        else 
+        {
+            DWORD error = GetLastError();
+            if (error != ERROR_BROKEN_PIPE) {
+                fprintf(stderr, "ReadFile failed: %lu\n", error);
+            }
+            break;
+        }
+    }    
+#else
+    ssize_t bytes_read;
+    
+    // as long as there are stuff to read read, maybe limit it so we dont get stuck ?
+    while ((bytes_read = read(proc->pipe_fd, buffer, sizeof(buffer) - 1)) > 0) 
+    {
+        buffer[bytes_read] = '\0';
+        printf("[PID %d - %s]: %s", proc->pid, proc->cmd, buffer);
+        fflush(stdout);
+    }
+    
+    if (bytes_read == -1 && errno != EAGAIN && errno != EWOULDBLOCK) 
+    {
+        perror("read");
+    }
+#endif
+}
+
+int check_process_status(process_t *proc) 
+{
+#ifdef _WIN32
+    DWORD exit_code;
+    
+    if (!GetExitCodeProcess(proc->hProcess, &exit_code)) {
+        fprintf(stderr, "GetExitCodeProcess failed: %lu\n", GetLastError());
+        return 0;
+    }
+    
+    if (exit_code == STILL_ACTIVE) {
+        return 1;
+    }
+    
+    check_process_output(proc);
+    
+    CloseHandle(proc->pipe_fd);
+    CloseHandle(proc->hProcess);
+    
+    proc->active = 0;
+    
+    printf("[PID %lu - %s]: Exited with status %lu\n", 
+           proc->pid, proc->cmd, exit_code);
+    
+    return 0;
+#else
+    int status;
+    pid_t result = waitpid(proc->pid, &status, WNOHANG);
+    
+    if (result == 0) 
+    {
+        // Process still running
+        return 1;
+    } 
+    else if (result == proc->pid) 
+    {
+        // Read any remaining output
+        check_process_output(proc);
+        
+        close(proc->pipe_fd);
+        proc->active = 0;
+        
+        if (WIFEXITED(status)) 
+        {
+            printf("[PID %d - %s]: Exited with status %d\n", 
+                   proc->pid, proc->cmd, WEXITSTATUS(status));
+        } 
+        else if (WIFSIGNALED(status)) 
+        {
+            printf("[PID %d - %s]: Killed by signal %d\n", 
+                   proc->pid, proc->cmd, WTERMSIG(status));
+        }
+        
+        return 0;
+    } 
+    else 
+    {
+        perror("waitpid");
+        return 0;
+    }
+#endif
 }

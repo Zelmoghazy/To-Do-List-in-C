@@ -35,7 +35,7 @@ void todo_item_add_content(todo_item *item, char *content)
 
 void todo_item_add_note(todo_item *item, char *note)
 {
-    strncpy(item->note, note, MAX_TODO_SIZE-1);
+    strncpy(item->note, note, MAX_NOTE_SIZE-1);
 }
 
 void todo_list_search_content(todo_list *list, char *text)

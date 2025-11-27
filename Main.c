@@ -39,7 +39,6 @@ typedef struct
     i32 scroll_x, scroll_y;
 
     f32 drag_start_x, drag_start_y;
-    f32 drag_delta_x, drag_delta_y;
 
     f32  value;
     bool hover;
@@ -136,7 +135,6 @@ typedef struct ui_block_t
     bool toggled;
 
     f32 drag_start_x, drag_start_y;
-    f32 drag_delta_x, drag_delta_y;
 
     f32 value;
     f32 min_value;
@@ -241,6 +239,9 @@ struct context_t
 
     GLuint              texture;
     GLuint              read_fbo;
+    GLuint              shader;
+    GLuint              quad_vao;
+    GLuint              quad_vbo;
 
     GLFWcursor          *hand_cursor;
     GLFWcursor          *regular_cursor;
@@ -332,8 +333,6 @@ ui_block_t *ui_block_find_by_id(ui_context_t *ctx, u32 block_id);
 bool is_in_drag_handle(ui_block_t *block, i32 mouse_x, i32 mouse_y, rect_t *drag_rect);
 hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_rect_out);
 
-
-
 void set_dark_mode(GLFWwindow *window)
 {
     #ifdef _WIN32
@@ -376,7 +375,6 @@ void prof_record_results(void)
 
 void render_prof_entries(void)
 {
-
     i32 height = get_line_height(gc.font)*prof_buf_count;
     i32 width = 0;
 
@@ -961,7 +959,7 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
         {
             target->hover = true;
             if(!animation_get(target->id, &target->hot_anim_t)){
-                animation_start((u64)target->id, 0.0f, 1.0f, 0.5f, EASE_IN_OUT_CUBIC);
+                animation_start((u64)target->id, 0.0f, 1.0f, 0.2f, EASE_IN_OUT_CUBIC);
             }
         }
 
@@ -1065,6 +1063,7 @@ void ui_handle_mouse_button(ui_context_t *ctx)
                 switch(region)
                 {
                     case HIT_REGION_NONE:
+                        break;
                     case HIT_REGION_LEFT_EDGE:
                         if(target->resizeable && !target->resizing)
                         {
@@ -1523,6 +1522,7 @@ void ui_layout(ui_context_t *ctx)
         ui_block_layout(ctx, block); 
     }
 
+    /* Mark non-visible blocks */
     for (i32 i = ctx->layout_count - 1; i >= 0; i--)
     {
         ui_block_t *block = ctx->layout_order[i];
@@ -1588,7 +1588,6 @@ void ui_render(ui_context_t *ctx)
     }
     // always rendered last
     ui_render_modal(ctx);
-
 }
 
 
@@ -1609,8 +1608,6 @@ void ui_block_load_state(ui_block_t *block)
         block->resize_right = state->value.resize_right;
         block->resize_top = state->value.resize_top;
         block->resize_bottom = state->value.resize_bottom;
-        block->drag_delta_x = state->value.drag_delta_x; 
-        block->drag_delta_y = state->value.drag_delta_y;
         block->drag_start_x = state->value.drag_start_x; 
         block->drag_start_y = state->value.drag_start_y;
         block->scroll_y = state->value.scroll_y;
@@ -1636,9 +1633,7 @@ void ui_block_save_state(ui_block_t *block)
         .resize_left = block->resize_left,
         .resize_right = block->resize_right,
         .resize_top   = block->resize_top,
-        .resize_bottom   = block->resize_bottom,
-        .drag_delta_x = block->drag_delta_x,
-        .drag_delta_y = block->drag_delta_y,
+        .resize_bottom = block->resize_bottom,
         .drag_start_x = block->drag_start_x,
         .drag_start_y = block->drag_start_y,
         .scroll_y = block->scroll_y,
@@ -1976,6 +1971,8 @@ f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
     return slider->value;
 }
 
+/* -------------- Modal Widget stuff -------------- */
+
 void ui_begin_modal(ui_context_t *ctx, char *title, i32 width, i32 height)
 {
     i32 x = (gc.screen_width - width) / 2;
@@ -2008,6 +2005,105 @@ void ui_render_modal(ui_context_t *ctx)
         
         ui_render_block(ctx->modal_block);
     }
+}
+
+/* -------------- Radial menu stuff -------------- */
+
+
+typedef struct {
+    radial_layout_t layout;
+    char **labels;
+    i32 hovered_idx;
+    bool active;
+}radial_menu_t;
+
+bool point_in_segment(f32 mx, f32 my, radial_layout_t *layout, i32 segment_index) {
+    // Mouse relative to center
+    f32 dx = (mx - layout->center_x) / layout->scale_x;
+    f32 dy = (my - layout->center_y) / layout->scale_y;
+    
+    // To polar
+    f32 r = sqrtf(dx*dx + dy*dy);
+    f32 a = atan2f(dy, dx);
+    if (a < 0) a += 2*M_PI;
+    
+    // Get segment bounds
+    radial_segment_t seg = radial_get_segment(layout, segment_index, 1.0f);
+    
+    // Check if inside
+    return (r >= seg.inner_radius && r <= seg.outer_radius &&
+            a >= seg.angle_start && a <= seg.angle_end);
+}
+
+void ui_update_radial_menu(radial_menu_t *menu) {
+    if (!menu->active) return;
+    
+    menu->hovered_index = -1;
+    
+    for (i32 i = 0; i < arrlen(menu->labels); i++) {
+        if (point_in_segment(gc.mouseX, gc.mouseY, &menu->layout, i)) {
+            menu->hovered_index = i;
+            
+            if (gc.left_button_down) {
+                printf("Selected: %s\n", menu->labels[i]);
+                menu->active = false;
+            }
+            break;
+        }
+    }
+}
+
+void ui_render_radial_menu(radial_menu_t *menu) {
+    if (!menu->active) return;
+    
+    for (i32 i = 0; i < arrlen(menu->labels); i++) {
+        radial_segment_t seg = radial_get_segment(&menu->layout, i, 1.0f);
+        
+        color4_t color = (i == menu->hovered_index) ? 
+            (color4_t){120,120,180,255} : (color4_t){80,80,120,255};
+        
+        // Draw segment as lines (64 radial lines)
+        for (i32 j = 0; j < 64; j++) {
+            f32 angle = seg.angle_start + (seg.angle_end - seg.angle_start) * j / 64.0f;
+            
+            f32 x1, y1, x2, y2;
+            polar_to_cartesian((polar_t){seg.inner_radius, angle}, 
+                              menu->layout.center_x, menu->layout.center_y,
+                              menu->layout.scale_x, menu->layout.scale_y, &x1, &y1);
+            polar_to_cartesian((polar_t){seg.outer_radius, angle},
+                              menu->layout.center_x, menu->layout.center_y,
+                              menu->layout.scale_x, menu->layout.scale_y, &x2, &y2);
+            
+            draw_line(x1, y1, x2, y2, color);
+        }
+        
+        // Draw label at segment center
+        f32 mid_angle = (seg.angle_start + seg.angle_end) / 2.0f;
+        f32 mid_radius = (seg.inner_radius + seg.outer_radius) / 2.0f;
+        f32 text_x, text_y;
+        polar_to_cartesian((polar_t){mid_radius, mid_angle},
+                          menu->layout.center_x, menu->layout.center_y,
+                          menu->layout.scale_x, menu->layout.scale_y, &text_x, &text_y);
+        
+    }
+}
+
+void ui_radial_menu(ui_context_t *ctx, char *title, char **labels)
+{
+    ui_block_t *radial = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT));
+
+    radial->is_leaf = true;
+    radial->clickable = true;
+    radial->toggleable = true;
+    radial->draggable = true;
+    
+    radial->bg_color = HEX_TO_COLOR4(0xbd93f9);
+    radial->hover_color = lite(HEX_TO_COLOR4(0xbd93f9));
+
+    radial->custom_render = ui_render_radial_menu;
+    radial->custom_update = ui_update_radial_menu;
+
+    ui_add_child(ctx, radial);
 }
 
 /* -------------- Text Edit Widget Stuff -------------- */
@@ -2163,65 +2259,8 @@ void text_edit_clamp_cursor(text_edit_state_t *state)
     state->cursor_pos = Clamp(0, state->cursor_pos, state->buffer_len);
 }
 
-void ui_text_edit_update(ui_block_t *block)
+void ui_text_edit_shortcuts(text_edit_state_t *state)
 {
-    text_edit_map_t *map_entry = shgetp_null(gc.text_map, block->title);
-    if (!map_entry) return;
-    
-    text_edit_state_t *state = &map_entry->value;
-
-    state->cursor_blink_timer += gc.dt;
-    if (state->cursor_blink_timer > 0.5) {
-        state->cursor_visible = !state->cursor_visible;
-        state->cursor_blink_timer = 0.0;
-    }
-
-    if(block->clicked)
-    {
-        gc.focused_text_edit = block->title;
-        state->focused =  true;
-
-        state->cursor_pos = text_edit_get_char_at_x(block, state, gc.mouse_x);
-        state->selection_start = -1;
-        state->cursor_visible = true;
-        state->cursor_blink_timer = 0.0;
-
-    }
-    else if (gc.left_button_down && !block->hover && state->focused)
-    {
-        if (gc.focused_text_edit && strcmp(gc.focused_text_edit, block->title) == 0) {
-            gc.focused_text_edit = NULL;
-        }
-        state->focused = false;
-        state->selection_start = -1;
-    }
-
-    if(state->focused && block->dragging)
-    {
-        if(!state->mouse_selecting)
-        {
-            state->mouse_selecting = true;
-            state->drag_start_x = text_edit_get_char_at_x(block, state, block->drag_start_x);
-            state->selection_start = state->drag_start_x;
-        }
-
-        i32 current_pos = text_edit_get_char_at_x(block, state, gc.mouse_x);
-        state->selection_end = current_pos;
-        state->cursor_pos = current_pos;
-
-        if (state->selection_start == state->selection_end) {
-            state->selection_start = -1;
-        }
-    }
-
-    if (!block->dragging)
-    {
-        state->mouse_selecting = false;
-    }
-
-    if(!state->focused)
-        return;
-
     if (gc.key_just_pressed[GLFW_KEY_BACKSPACE]) 
     {
         if (gc.key_pressed[GLFW_KEY_LEFT_CONTROL] ||
@@ -2369,6 +2408,86 @@ void ui_text_edit_update(ui_block_t *block)
         state->selection_end = state->buffer_len;
         state->cursor_pos = state->buffer_len;
     }
+}
+
+void ui_text_edit_update(ui_block_t *block)
+{
+    text_edit_map_t *map_entry = shgetp_null(gc.text_map, block->title);
+    if (!map_entry) return;
+    
+    text_edit_state_t *state = &map_entry->value;
+
+    // blinking cursor animation
+    state->cursor_blink_timer += gc.dt;
+    if (state->cursor_blink_timer > 0.5) {
+        state->cursor_visible = !state->cursor_visible;
+        state->cursor_blink_timer = 0.0;
+    }
+
+    if(block->clicked)
+    {
+        // gain focus
+        gc.focused_text_edit = block->title;
+        state->focused =  true;
+
+        state->cursor_pos = text_edit_get_char_at_x(block, state, gc.mouse_x);
+        state->selection_start = -1;
+        state->cursor_visible = true;
+        state->cursor_blink_timer = 0.0;
+    }
+    else if (gc.left_button_down && !block->hover && state->focused)
+    {
+        // clicked outside lose focus
+        if (gc.focused_text_edit && strcmp(gc.focused_text_edit, block->title) == 0) {
+            gc.focused_text_edit = NULL;
+        }
+        state->focused = false;
+        state->selection_start = -1;
+    }
+
+    if (gc.left_button_down)
+    {
+        if(block->hover)
+        {
+            if(!state->dragging)
+            {
+                state->dragging = true;
+                block->drag_start_x = gc.mouse_x;
+            }
+        }
+    }
+    else
+    {
+        state->dragging = false;
+    }
+
+    if(state->focused && state->dragging)
+    {
+        if(!state->mouse_selecting)
+        {
+            state->mouse_selecting = true;
+            state->drag_start_x = text_edit_get_char_at_x(block, state, block->drag_start_x);
+            state->selection_start = state->drag_start_x;
+        }
+
+        i32 current_pos = text_edit_get_char_at_x(block, state, gc.mouse_x);
+        state->selection_end = current_pos;
+        state->cursor_pos = current_pos;
+
+        if (state->selection_start == state->selection_end) {
+            state->selection_start = -1;
+        }
+    }
+
+    if (!block->dragging)
+    {
+        state->mouse_selecting = false;
+    }
+
+    if(!state->focused)
+        return;
+
+    ui_text_edit_shortcuts(state);
 
     for (i32 i = 0; i < gc.input_char_count; i++) 
     {
@@ -2637,8 +2756,8 @@ void blit_to_screen(void *pixels, u32 width, u32 height)
                     (int)width, (int)height,
                     GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, gc.read_fbo);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // make the default framebuffer active again ?
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gc.read_fbo); // source
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);           // destination, make the default framebuffer active again ?
     
     // transfer pixel values from one region of a read framebuffer to another region of a draw framebuffer.
     glBlitFramebuffer(0, 0, width, height,  // src
@@ -2649,7 +2768,10 @@ void blit_to_screen(void *pixels, u32 width, u32 height)
 
 void present_frame(image_view_t* view) 
 {
-    blit_to_screen(view->pixels, view->width, view->height);
+    PROFILE("blit_to_screen")
+    {
+        blit_to_screen(view->pixels, view->width, view->height);
+    }
     glfwSwapBuffers((GLFWwindow*)gc.window);
 }
 
@@ -2853,30 +2975,31 @@ void render_all(void)
         }
 
         reset_input_for_frame(); 
-    } 
+    }   
+ 
 
-/*    PROFILE("Building and rendering the ui")
-    {
-        text_edit_state_t *text_state = NULL;
+    // PROFILE("Building and rendering the ui")
+    // {
+    //     text_edit_state_t *text_state = NULL;
 
-        PROFILE("Building UI Tree")
-        {
-            ui_begin_panel_floating(gc.ui_ctx, "Root", 200, 300, 400, 200);
-            ui_end_panel(gc.ui_ctx);
-        }
+    //     PROFILE("Building UI Tree")
+    //     {
+    //         ui_begin_panel_floating(gc.ui_ctx, "Root", 200, 300, 400, 200);
+    //         ui_end_panel(gc.ui_ctx);
+    //     }
 
-        PROFILE("UI Layout")
-        {
-            ui_layout(gc.ui_ctx);
-        }
+    //     PROFILE("UI Layout")
+    //     {
+    //         ui_layout(gc.ui_ctx);
+    //     }
 
-        PROFILE("UI Rendering")
-        {
-            ui_render(gc.ui_ctx);
-        }
+    //     PROFILE("UI Rendering")
+    //     {
+    //         ui_render(gc.ui_ctx);
+    //     }
 
-        reset_input_for_frame(); 
-    }*/
+    //     reset_input_for_frame(); 
+    // }
  
     if(gc.debug)
     {
@@ -2979,6 +3102,9 @@ void init_framebuffer(i32 max_width, i32 max_height)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 
                  max_width, max_height,
                  0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glGenFramebuffers(1, &gc.read_fbo);
 
@@ -2987,6 +3113,12 @@ void init_framebuffer(i32 max_width, i32 max_height)
     // attach the texture to the framebuffer
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, gc.texture, 0);
+
+    if(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) 
+    {
+        fprintf(stderr, "Framebuffer not complete!\n");
+        exit(1);
+    }
 }
 
 void *create_window(u32 width, u32 height, char *title)
@@ -3125,6 +3257,7 @@ int main(void)
         }
         
         cleanup_all();
+
         present_frame(&gc.draw_buffer);
     }
     return 0;

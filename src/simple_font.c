@@ -88,6 +88,18 @@ simple_font_t* init_simple_font(u32 *font_pixels)
     return font;
 }
 
+/* 
+
+                 ┌─┐
+          ┌─────►│a│
+          │      └─┘
+         ┌┼┬─┬─┐    
+         │a│b│c│    
+         ├─┼─┼─┤    
+         │d│e│f│    
+         └─┴─┴─┘    
+*/
+
 void render_glyph_to_buffer(rendered_text_t *text, u32 glyph_idx,
                             image_view_t const *color_buf,
                             u32 dst_x, u32 dst_y)
@@ -99,24 +111,24 @@ void render_glyph_to_buffer(rendered_text_t *text, u32 glyph_idx,
     u32 dst_w = text->font->font_char_width * text->scale;
     u32 dst_h = text->font->font_char_height * text->scale;
 
-
-    // Completely outside the screen
+    // The entire text is outside the screen)
     if (dst_x >= color_buf->width || 
         dst_y >= color_buf->height)
     {
         return;
     }
 
-    if ((int)dst_x + (int)dst_w <= 0 ||
-        (int)dst_y + (int)dst_h <= 0)
+    if (dst_x + dst_w <= 0 ||
+        dst_y + dst_h <= 0)
     {
         return;
     }
-
-    u32 x_start = ((int)dst_x < 0) ? 0 : dst_x;
-    u32 y_start = ((int)dst_y < 0) ? 0 : dst_y;
-    u32 x_end = (dst_x + dst_w > color_buf->width) ? color_buf->width : dst_x + dst_w;
-    u32 y_end = (dst_y + dst_h > color_buf->height) ? color_buf->height : dst_y + dst_h;
+   
+    u32 x_start =  MAX(0, dst_x);
+    u32 y_start =  MAX(0, dst_y);
+    
+    u32 x_end = MIN(color_buf->width, dst_x + dst_w);
+    u32 y_end = MIN(color_buf->height, dst_y + dst_h);
     
     // how much we scale it from how its represented in the atlas
     // this is the most annoying part here that we have to think about
@@ -142,7 +154,8 @@ void render_glyph_to_buffer(rendered_text_t *text, u32 glyph_idx,
                 HEX_TO_RGBA(src_pixel, src_pixel_raw);
                 
                 // blit the font to the buffer
-                if (src_pixel.r != 0 || src_pixel.g != 0 || src_pixel.b != 0) {
+                if (src_pixel.r != 0 || src_pixel.g != 0 || src_pixel.b != 0) 
+                {
                     BUF_AT(color_buf,x,y) = src_pixel;
                 }
             }
@@ -172,11 +185,11 @@ void render_text(image_view_t const *color_buf, rendered_text_t *text)
             }
             else if (*string == '\t')
             {
-                x+=scaled_width * TAB_SIZE;
+                x += scaled_width * TAB_SIZE;
             }
             else
             {
-                fprintf(stderr, "Unknown character!\n");
+                fprintf(stderr, "Unknown character! : %c \n", *string);
             }
             string++;
             continue;
@@ -190,7 +203,7 @@ void render_text(image_view_t const *color_buf, rendered_text_t *text)
         if(x > color_buf->width) 
         {
             y += scaled_height;
-            x=0;
+            x = text->pos.x;
         }
         string++;
     }

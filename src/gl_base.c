@@ -279,7 +279,7 @@ void init_render_object(render_obj_t* obj, i32 max_vertices, char* vs, char* fs)
     obj->vertex_count = 0;
 }
 
-render_obj_t init_rect(char* vs, char* fs)
+render_obj_t init_quad(char* vs, char* fs)
 {
     f32 vertices[] = 
     {

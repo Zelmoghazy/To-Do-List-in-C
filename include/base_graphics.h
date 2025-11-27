@@ -127,6 +127,7 @@ color4_t color4_lerp(color4_t c1, color4_t c2, f32 t);
 color4_t average(color4_t c, color4_t d);
 color4_t dark(color4_t c);
 color4_t lite(color4_t c);
+color4_t rgb_from_wavelength(f64 wave);
 
 inline void set_pixel(image_view_t const *img, i32 x, i32 y, color4_t color);
 inline color4_t get_pixel(image_view_t const *img, i32 x, i32 y);

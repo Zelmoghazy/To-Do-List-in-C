@@ -6,7 +6,15 @@
     #include <winnt.h>
     #include <uxtheme.h>
     #include <dwmapi.h>
+#else
+    #include <pthread.h>
+    #include <unistd.h>
+    #include <sys/types.h>
+    #include <sys/wait.h>
+    #include <fcntl.h>
+    #include <errno.h>
 #endif
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +43,23 @@
 
 #define Member(T,m) (((T*)0)->m)
 #define OffsetOfMember(T,m) IntFromPtr(&Member(T,m))
+
+#define MemoryZero(p,z)        memset((p), 0, (z))
+#define MemoryZeroStruct(p)    MemoryZero((p), sizeof(*(p)))
+#define MemoryZeroArray(p)     MemoryZero((p), sizeof(p))
+#define MemoryZeroTyped(p,c)   MemoryZero((p), sizeof(*(p))*(c))
+
+#define MemoryMatch(a,b,z)     (memcmp((a),(b),(z)) == 0)
+
+#define MemoryCopy(d,s,z)      memmove((d), (s), (z))
+#define MemoryCopyStruct(d,s)  MemoryCopy((d),(s),\
+                               MIN(sizeof(*(d)),sizeof(*(s))))
+
+#define MemoryCopyArray(d,s)   MemoryCopy((d),(s),Min(sizeof(s),sizeof(d)))
+#define MemoryCopyTyped(d,s,c) MemoryCopy((d),(s),\
+                               MIN(sizeof(*(d)),sizeof(*(s)))*(c))
+
+#define Stmnt(S)               do{ S }while(0)
 
 #define DEBUG_PRT(fmt, ...)\
     do{\
@@ -129,6 +154,8 @@ const char* enum_strings[] = {
 #define ALIGN_UP(x, y)                  ((((x) + (y) - 1) / (y)) * (y))
 
 #define FPS(n)                          (1000/n)
+
+#define MIDPOINT(start, end)            ((start) + ((end) - (start)) / 2)
 
 #define RANGE_CONVERT(value, from_min, from_max, to_min, to_max) \
     (((value) - (from_min)) * ((to_max) - (to_min)) / ((from_max) - (from_min)) + (to_min))
@@ -240,12 +267,23 @@ typedef double      f64;
     typedef DWORD (WINAPI *thread_func_t)(LPVOID);
     typedef LPVOID thread_func_param_t;
     typedef DWORD WINAPI thread_func_ret_t;
+    typedef CONDITION_VARIABLE cond_handle_t;
+    typedef CRITICAL_SECTION mutex_handle_t;
+    typedef HANDLE pipe_handle;
+    typedef HANDLE event_handle;
 #else
-    #include <pthread.h>
     typedef pthread_t thread_handle_t;
     typedef void* (*thread_func_t)(void*);
     typedef void* thread_func_param_t;
     typedef void* thread_func_ret_t;
+    typedef pthread_mutex_t mutex_handle_t;
+    typedef pthread_cond_t cond_handle_t;
+    typedef int pipe_handle;
+    typedef struct {
+        pthread_mutex_t mutex;
+        pthread_cond_t cond;
+        bool signaled;
+    }event_handle;
 #endif
 
 global_variable u32 sign32     = 0x80000000;
@@ -298,10 +336,53 @@ typedef struct vec4f_t
     f32 x, y, z, w;    
 }vec4f_t;
 
+#define MAT(m,r,c) (m)[(r)*4+(c)]
+#define SWAP_ROWS(a, b) { f32 *_tmp = a; (a)=(b); (b)=_tmp; }
+
 typedef struct mat4x4_t
 {
     f32 values[16];
 }mat4x4_t;
+
+/* 
+    3D rotations fundamentally have 3 degrees of freedom but can be represented in multiple ways, each with tradeoffs.
+
+    Rotation matrices (3×3, storing 9 numbers)
+        are intuitive and easy to compose but suffer from numerical drift over time, 
+        requiring expensive re-orthonormalization to maintain the six constraints
+        that keep rows unit-length and perpendicular. 
+
+    Euler angles (yaw/pitch/roll, 3 numbers)
+        are memory-efficient and drift-free since they have no constraints, 
+        but suffer from gimbal lock and can't easily compose or interpolate rotations. 
+
+    Axis-angle representation (unit axis + angle, 4 numbers) 
+        elegantly captures Euler's theorem that any rotation is a single spin around some axis 
+        and avoids gimbal lock, but still can't easily compose rotations or interpolate smoothly,
+        plus has multiple representations for the same rotation.
+
+    This leads us to quaternions (4 numbers with unit constraint), which combine the best properties:
+        no gimbal lock, easy composition through multiplication, smooth interpolation via SLERP, 
+        and only minimal drift requiring occasional cheap normalization—making them the preferred
+        choice for storing and updating orientations in modern game engines and physics simulations.
+
+    There are several notations that we can use to represent quaternions.
+    The two most popular notations are :
+
+    - complex number notation 
+        w + xi + yj + zk (where i^2 = j^2 = k = -1 and ij = k = -ij with real w, x, y, z)
+
+    - 4D vector notation
+        [w, v] (where v = (x, y, z) is called a “vector” and w is called a “scalar”)
+
+    the rotation of a vector v by a unit quaternion q can be represented as
+        v´ = q v q-1 (where v = [0, v])
+        The result, a rotated vector v´, will always have a 0 scalar value for w
+*/
+typedef struct
+{
+	f32 x,y,z,w;
+} quat_t;
 
 typedef enum {
     EASE_LINEAR,
@@ -333,6 +414,39 @@ typedef struct {
 extern animation_t animation_items[ANIMATION_MAX_ITEMS];
 extern i32 animation_item_count;
 
+typedef void (*job_func_t)(void* data);
+
+typedef struct 
+{
+    job_func_t func;
+    void* data;
+}job_t;
+
+typedef struct 
+{
+    thread_handle_t* threads;      
+    job_t* jobs;                   
+    mutex_handle_t queue_mutex;
+    cond_handle_t mutex_condition;
+    bool should_terminate;
+} thread_pool_t;
+
+typedef struct
+{
+    #ifdef _WIN32
+        DWORD pid;
+        HANDLE pipe_fd;
+        HANDLE hProcess;
+        char cmd[256];
+        int active;
+    #else
+        pid_t pid;
+        int pipe_fd;
+        char cmd[256];
+        int active;
+    #endif    
+}process_t;
+
 void print_spaces(const char* message, i32 spaces);
 void log_color(char *text, char c);
 void log_error(i32 error_code, const char* file, i32 line);
@@ -347,6 +461,8 @@ u32 fnv1a_hash(const char *str);
 u64 arith_mod(u64 x, u64 y);
 f32 d_sqrt(f32 number);
 f32 smoothstep(f32 edge0, f32 edge1, f32 x); 
+f32 sine_deg(i32 x);
+f32 cosine_deg(i32 x);
 
 vec2f_t vec2f(float x, float y);
 vec2f_t vec2f_add(vec2f_t a, vec2f_t b);
@@ -375,6 +491,7 @@ vec3f_t vec3f_refract(vec3f_t v, vec3f_t n, float e);
 mat4x4_t mat4x4_mult(mat4x4_t const *m, mat4x4_t const *n);
 mat4x4_t mat4x4_mult_simd(mat4x4_t const *m, mat4x4_t const *n);
 mat4x4_t mat4x4_transpose(mat4x4_t const *m);
+bool mat4x4_invert(mat4x4_t const *m, mat4x4_t *out);
 mat4x4_t mat_perspective(f32 n, f32 f, f32 fovY, f32 aspect_ratio);
 mat4x4_t mat_orthographic(f32 left, f32 right, f32 bottom, f32 top, f32 near, f32 far);
 mat4x4_t mat_identity(void);
@@ -385,6 +502,21 @@ mat4x4_t mat_translate(vec3f_t s);
 mat4x4_t mat_rotate_xy(f32 angle);
 mat4x4_t mat_rotate_yz(f32 angle);
 mat4x4_t mat_rotate_zx(f32 angle);
+vec3f_t mat_direction_from_angles(f32 yaw, f32 pitch);
+mat4x4_t mat_rotation_from_direction(vec3f_t front, vec3f_t world_up);
+mat4x4_t mat_rotation_from_angles(f32 yaw, f32 pitch);
+mat4x4_t mat_look_at(vec3f_t eye, vec3f_t center, vec3f_t up);
+
+quat_t quat_from_mat4x4(mat4x4_t const *mat);
+mat4x4_t quat_to_mat4x4(quat_t const *quat);
+quat_t quat_mult(quat_t const *q1, quat_t const *q2);
+quat_t quat_mult2(quat_t *quat1, quat_t *quat2);
+void quat_normalize(quat_t *quat);
+void quat_from_euler(vec3f_t *rot, quat_t *quat);
+void quat_from_euler2(vec3f_t *rot, quat_t *quat);
+void quat_to_axis_angle(quat_t *quat, quat_t *axisAngle);
+void quat_slerp(quat_t *quat1, quat_t *quat2, float slerp, quat_t *result);
+
 
 f64 apply_easing(f64 t, easing_type easing);
 void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type easing);
@@ -398,6 +530,29 @@ void get_time(void *time);
 thread_handle_t create_thread(thread_func_t func, thread_func_param_t data);
 void join_thread(thread_handle_t thread);
 int get_core_count(void);
+void mutex_init(mutex_handle_t* mutex);
+void mutex_destroy(mutex_handle_t* mutex);
+void mutex_lock(mutex_handle_t* mutex);
+void mutex_unlock(mutex_handle_t* mutex);
+void cond_init(cond_handle_t* cond);
+void cond_destroy(cond_handle_t* cond);
+void cond_wait(cond_handle_t* cond, mutex_handle_t* mutex);
+void cond_signal(cond_handle_t* cond);
+void cond_broadcast(cond_handle_t* cond);
+void event_create(event_handle *event);
+void event_destroy(event_handle *event);
+bool event_wait(event_handle *event);
+bool event_activate(void *event);
+thread_func_ret_t thread_loop(thread_func_param_t param);
+thread_pool_t* threadpool_create(void);
+void threadpool_destroy(thread_pool_t* pool);
+void threadpool_queue_job(thread_pool_t* pool, job_func_t func, void* data);
+bool threadpool_busy(thread_pool_t* pool);
+int set_non_blocking(pipe_handle fd);
+int spawn_process(process_t *proc, const char *command);
+void check_process_output(process_t *proc);
+int check_process_status(process_t *proc);
+
 
 const char* get_file_extension(const char *filepath);
 

@@ -4,9 +4,10 @@ mkdir build
 copy ".\external\lib\*.dll"  ".\build\"
 
 :: set enviroment vars and requred stuff for the msvc compiler
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+call "D:\Programming\Software\msvc\setup_x64.bat"
 
 set CFLAGS=/Zi /EHsc /D_AMD64_ /fp:fast /W4 /MD /nologo /utf-8 /std:clatest /arch:AVX
+:: /SUBSYSTEM:CONSOLE , /SUB-SYSTEM:WINDOWS 
 set L_FLAGS=/SUBSYSTEM:CONSOLE
 set SRC=..\Main.c ..\src\util.c ..\src\arena.c ..\src\base_graphics.c ..\src\simple_font.c ..\src\font.c ..\src\todo.c ..\external\src\glad.c
 set INCLUDE_DIRS=/I..\include /I..\external\include\
