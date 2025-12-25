@@ -1,3 +1,4 @@
+#define WIN32_LEAN_AND_MEAN 
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -201,7 +202,7 @@ typedef struct
 
 typedef struct 
 {
-    char buffer [TEXT_BUFFER_MAX];
+    char buffer[TEXT_BUFFER_MAX];
     i32 buffer_len;
     i32 cursor_pos;
 
@@ -322,7 +323,7 @@ void ui_scroll_block(ui_block_t *block, i32 delta_x, i32 delta_y);
 void ui_handle_mouse_move(ui_context_t *ctx, f32 mouse_x, f32 mouse_y);
 void ui_handle_mouse_button(ui_context_t *ctx);
 void ui_handle_scroll(ui_context_t *ctx, f32 scroll_x, f32 scroll_y);
-void ui_block_abs_pos(ui_block_t *block, i32 *abs_x, i32 *abs_y);
+void ui_block_abs_pos (ui_block_t *block, i32 *abs_x, i32 *abs_y);
 void ui_block_load_state(ui_block_t *block);
 void ui_block_save_state(ui_block_t *block);
 void ui_update_block_interaction(ui_block_t *block);
@@ -655,13 +656,13 @@ ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width
     if(block->id != ctx->hot_block_id)
     {
         block->hover = false;
+        block->released = false;
     }
 
     if(block->id != ctx->active_block_id)
     {
         block->dragging = false;
         block->resizing = false;
-        block->released = false;
         block->clicked = false;
     }
     
@@ -1307,7 +1308,7 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
                 child = NULL;
                 LIST_FOR_EACH_DOWN(child,block->first)
                 {
-                    child->x = base_x;
+                    child->x = base_x + child->x;
                     child->y = current_y;
                     
                     // Only leaf block can have a text item
@@ -1319,7 +1320,8 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
                         i32 center_x = (base_x + (child->w - text_width)/2);
                         i32 center_y = current_y + (default_item_height-text_height)/2;
 
-                        child->text.pos.x = center_x < 0 ? base_x + 10 : center_x;
+                        child->text.pos.x =
+                            center_x < 0 ? child->x + 10 : center_x;
                         child->text.pos.y = center_y < 0 ? current_y + 10 : center_y;
                     }
 
@@ -1332,8 +1334,8 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
                 ui_block_t *child = NULL;
                 LIST_FOR_EACH_DOWN(child,block->first)
                 {
-                    i32 child_width  = child->h;
-                    i32 child_height = child->w;  
+                    i32 child_width  = child->w;
+                    i32 child_height = child->h;  
 
                     content_width += child_width;
                     content_height = MAX(child_height, content_height);
@@ -1589,7 +1591,6 @@ void ui_render(ui_context_t *ctx)
     // always rendered last
     ui_render_modal(ctx);
 }
-
 
 void ui_block_load_state(ui_block_t *block)
 {
@@ -1930,6 +1931,8 @@ void ui_render_slider(ui_block_t *block)
 
 void ui_update_slider(ui_block_t *block) 
 {
+    block->value = block->value < block->min_value?block->min_value:block->value;
+    
     if(block->id != gc.ui_ctx->active_block_id)
     {
         block->clicked = false;
@@ -1946,6 +1949,7 @@ void ui_update_slider(ui_block_t *block)
         
         block->value = LERP_F32(block->min_value, block->max_value, normalized);
     }
+
 }
 
 f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
@@ -2009,88 +2013,169 @@ void ui_render_modal(ui_context_t *ctx)
 
 /* -------------- Radial menu stuff -------------- */
 
+typedef struct 
+{
+    char *label;
+    void (*on_select)(void *user_data);
+    void *user_data;
+    color4_t color;
+    color4_t hover_color;
+    bool selected;
+} radial_menu_item_t;
 
-typedef struct {
+typedef struct 
+{
     radial_layout_t layout;
-    char **labels;
-    i32 hovered_idx;
+    radial_menu_item_t *items;  // Dynamic array
+    i32 hovered_index;
+    i32 selected_index;
     bool active;
-}radial_menu_t;
+} radial_menu_state_t;
 
-bool point_in_segment(f32 mx, f32 my, radial_layout_t *layout, i32 segment_index) {
-    // Mouse relative to center
-    f32 dx = (mx - layout->center_x) / layout->scale_x;
-    f32 dy = (my - layout->center_y) / layout->scale_y;
-    
-    // To polar
-    f32 r = sqrtf(dx*dx + dy*dy);
-    f32 a = atan2f(dy, dx);
-    if (a < 0) a += 2*M_PI;
-    
-    // Get segment bounds
-    radial_segment_t seg = radial_get_segment(layout, segment_index, 1.0f);
-    
-    // Check if inside
-    return (r >= seg.inner_radius && r <= seg.outer_radius &&
-            a >= seg.angle_start && a <= seg.angle_end);
-}
+typedef struct { char *key; radial_menu_state_t value; } radial_menu_map_t;
+radial_menu_map_t *g_radial_menu_map = NULL;
 
-void ui_update_radial_menu(radial_menu_t *menu) {
+void ui_update_radial_menu(ui_block_t *block) 
+{
+    radial_menu_map_t *map_entry = shgetp_null(g_radial_menu_map, block->title);
+    if (!map_entry) return;
+    
+    radial_menu_state_t *menu = &map_entry->value;
     if (!menu->active) return;
+    
+    i32 abs_x, abs_y;
+    ui_block_abs_pos(block, &abs_x, &abs_y);
+    
+    menu->layout.center_x = abs_x + block->w / 2.0f;
+    menu->layout.center_y = abs_y + block->h / 2.0f;
+    
+    f32 mouse_x = (f32)gc.mouse_x;
+    f32 mouse_y = (f32)gc.mouse_y;
     
     menu->hovered_index = -1;
     
-    for (i32 i = 0; i < arrlen(menu->labels); i++) {
-        if (point_in_segment(gc.mouseX, gc.mouseY, &menu->layout, i)) {
+    for (i32 i = 0; i < arrlen(menu->items); i++) 
+    {
+        radial_segment_t seg = radial_get_segment(&menu->layout, i, 1.0f);
+        
+        if (point_in_radial_segment(mouse_x, mouse_y, &menu->layout, &seg)) 
+        {
             menu->hovered_index = i;
-            
-            if (gc.left_button_down) {
-                printf("Selected: %s\n", menu->labels[i]);
-                menu->active = false;
-            }
             break;
         }
     }
-}
 
-void ui_render_radial_menu(radial_menu_t *menu) {
-    if (!menu->active) return;
+    bool release = block->released;
+
+    if(release){
+        block->released = false;
+    }
     
-    for (i32 i = 0; i < arrlen(menu->labels); i++) {
-        radial_segment_t seg = radial_get_segment(&menu->layout, i, 1.0f);
+    if (release && menu->hovered_index >= 0) 
+    {
+        menu->selected_index = menu->hovered_index;
         
-        color4_t color = (i == menu->hovered_index) ? 
-            (color4_t){120,120,180,255} : (color4_t){80,80,120,255};
+        radial_menu_item_t *item = &menu->items[menu->selected_index];
+        item->selected = true;
         
-        // Draw segment as lines (64 radial lines)
-        for (i32 j = 0; j < 64; j++) {
-            f32 angle = seg.angle_start + (seg.angle_end - seg.angle_start) * j / 64.0f;
-            
-            f32 x1, y1, x2, y2;
-            polar_to_cartesian((polar_t){seg.inner_radius, angle}, 
-                              menu->layout.center_x, menu->layout.center_y,
-                              menu->layout.scale_x, menu->layout.scale_y, &x1, &y1);
-            polar_to_cartesian((polar_t){seg.outer_radius, angle},
-                              menu->layout.center_x, menu->layout.center_y,
-                              menu->layout.scale_x, menu->layout.scale_y, &x2, &y2);
-            
-            draw_line(x1, y1, x2, y2, color);
+        if (item->on_select) {
+            item->on_select(item->user_data);
         }
-        
-        // Draw label at segment center
-        f32 mid_angle = (seg.angle_start + seg.angle_end) / 2.0f;
-        f32 mid_radius = (seg.inner_radius + seg.outer_radius) / 2.0f;
-        f32 text_x, text_y;
-        polar_to_cartesian((polar_t){mid_radius, mid_angle},
-                          menu->layout.center_x, menu->layout.center_y,
-                          menu->layout.scale_x, menu->layout.scale_y, &text_x, &text_y);
         
     }
 }
 
-void ui_radial_menu(ui_context_t *ctx, char *title, char **labels)
+void ui_render_radial_menu(ui_block_t *block) 
 {
-    ui_block_t *radial = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT));
+    radial_menu_map_t *map_entry = shgetp_null(g_radial_menu_map, block->title);
+    if (!map_entry) return;
+    
+    radial_menu_state_t *menu = &map_entry->value;
+    if (!menu->active) return;
+    
+    for (i32 i = 0; i < arrlen(menu->items); i++) 
+    {
+        radial_menu_item_t *item = &menu->items[i];
+        radial_segment_t seg = radial_get_segment(&menu->layout, i, 1.0f);
+        
+        color4_t color = item->color;
+        if (i == menu->hovered_index) 
+        {
+            color = item->hover_color;
+        }
+        if (i == menu->selected_index) 
+        {
+            color = lite(color);
+        }
+        
+        draw_radial_segment_filled(&gc.draw_buffer, &menu->layout, &seg, color);
+        
+        if (item->label) 
+        {
+            f32 mid_angle = (seg.angle_start + seg.angle_end) / 2.0f;
+            f32 mid_radius = (seg.inner_radius + seg.outer_radius) / 2.0f;
+            
+            polar_t text_pos = { .radius = mid_radius, .angle = mid_angle };
+            f32 text_x, text_y;
+            polar_to_cartesian(text_pos, menu->layout.center_x, menu->layout.center_y,
+                              menu->layout.scale_x, menu->layout.scale_y,
+                              &text_x, &text_y);
+            
+            f32 text_width = get_string_width(block->text.font, item->label);
+            f32 text_height = get_line_height(block->text.font);
+            
+            rendered_text_tt icon = {
+                .font = gc.icon_font,
+                .pos = {.x = text_x-10, .y = text_y-10},
+                .color = HEX_TO_COLOR4(0xe7f8f2),
+                .string = NOTE_ICON
+            };
+            render_string_unicode(&gc.draw_buffer, &icon);
+        }
+    }
+}
+
+void radial_menu_add_item(radial_menu_state_t *menu, char *label, void (*callback)(void*), void *user_data) 
+{
+    radial_menu_item_t item = {
+        .label = label,
+        .on_select = callback,
+        .user_data = user_data,
+        .color = {80, 80, 120, 255},
+        .hover_color = {120, 120, 180, 255},
+        .selected = false
+    };
+    
+    arrput(menu->items, item);
+    menu->layout.num_segments = arrlen(menu->items);
+}
+
+radial_menu_map_t *ui_radial_menu(ui_context_t *ctx, char *title, f32 x, f32 y, f32 radius)
+{
+    radial_menu_map_t *map_entry = shgetp_null(g_radial_menu_map, title);
+    if (!map_entry) 
+    {
+        radial_menu_state_t state = {
+            .layout = {
+                .center_x = x,
+                .center_y = y,
+                .scale_x = 1.0f,
+                .scale_y = 1.0f,
+                .num_segments = 0,
+                .inner_radius = radius * 0.3f,
+                .outer_radius = radius,
+                .rotation = -M_PI / 2.0f, 
+                .gap_factor = 0.1f
+            },
+            .items = NULL,
+            .hovered_index = -1,
+            .selected_index = -1,
+            .active = true
+        };
+        shput(g_radial_menu_map, title, state);
+    }
+
+    ui_block_t *radial = CHECK_PTR(ui_new_block(ctx, title, x - radius, y - radius, radius * 2, radius * 2, NO_LAYOUT));
 
     radial->is_leaf = true;
     radial->clickable = true;
@@ -2104,7 +2189,9 @@ void ui_radial_menu(ui_context_t *ctx, char *title, char **labels)
     radial->custom_update = ui_update_radial_menu;
 
     ui_add_child(ctx, radial);
-}
+
+    return map_entry;
+} 
 
 /* -------------- Text Edit Widget Stuff -------------- */
 
@@ -2593,7 +2680,7 @@ void ui_render_text_edit(ui_block_t *block)
     pop_scissor();
 }
 
-text_edit_state_t *ui_text_edit(ui_context_t *ctx, char *title, char *initial_text)
+text_edit_state_t *ui_text_edit(ui_context_t *ctx, char *title, i32 x, i32 y, i32 width, char *initial_text)
 {
     text_edit_map_t *map_entry = shgetp_null(gc.text_map, title);
 
@@ -2608,7 +2695,7 @@ text_edit_state_t *ui_text_edit(ui_context_t *ctx, char *title, char *initial_te
         shput(gc.text_map, title, state);
     }
 
-    ui_block_t *block = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT));
+    ui_block_t *block = CHECK_PTR(ui_new_block(ctx, title, x, y, width, 40, NO_LAYOUT));
 
     block->is_leaf = true;
     block->clickable = true;
@@ -2622,6 +2709,110 @@ text_edit_state_t *ui_text_edit(ui_context_t *ctx, char *title, char *initial_te
     return &shgetp_null(gc.text_map, title)->value;
 }
 
+/* Multiline text label stuff */
+void ui_render_text_label (ui_block_t *block)
+{
+    text_edit_map_t *map_entry = shgetp_null(gc.text_map, block->title);
+    if(!map_entry){
+        return;
+    }
+    text_edit_state_t *state = &map_entry->value;
+
+    if(block->bg_color.a > 0){
+        ui_draw_rounded_rect_in_block(block, block->x, block->y, block->w, block->h, block->bg_color);
+    }
+
+    i32 abs_x, abs_y;
+    ui_block_abs_pos(block, &abs_x, &abs_y);
+    
+    i32 padding = 5;
+    push_scissor(abs_x + padding, abs_y + padding, 
+                 block->w - padding * 2, block->h - padding * 2);
+                 
+        i32 line_height = get_line_height(block->text.font);
+        
+        i32 current_line = 0;
+        i32 line_start = 0;
+        
+        PROFILE("Rendering Text")
+        {
+            for (i32 i = 0; i <= state->buffer_len; i++) 
+            {
+                bool is_newline = (i < state->buffer_len && state->buffer[i] == '\n');
+                bool is_end = (i == state->buffer_len);
+                
+                // render line by line
+                if (is_newline || is_end) 
+                {
+                    i32 line_len = i - line_start;
+                    
+                    if (line_len > 0) 
+                    {
+                        char line_buffer[TEXT_BUFFER_MAX];
+                        strncpy(line_buffer, &state->buffer[line_start], line_len);
+                        line_buffer[line_len] = '\0';
+                        
+                        rendered_text_tt text = 
+                        {
+                            .font = block->text.font,
+                            .pos = {
+                                .x = block->x + padding,
+                                .y = block->y + padding + current_line * line_height
+                            },
+                            .color = COLOR_WHITE,
+                            .string = line_buffer
+                        };
+                        
+                        block->text = text;
+                        ui_render_text_in_block(block);
+                    }
+                    
+                    current_line++;
+                    line_start = i + 1;
+                }
+            }
+        }
+    pop_scissor();
+}
+
+void ui_text_label(ui_context_t *ctx, char *title, const char *text, i32 x, i32 y, i32 max_width, color4_t bg_color)
+{
+    text_edit_map_t *map_entry = shgetp_null(gc.text_map, title);
+
+    if (!map_entry) 
+    {
+        text_edit_state_t state = {0};
+        shput(gc.text_map, title, state);
+        map_entry = shgetp_null(gc.text_map, title);
+    }
+    
+    text_edit_state_t *state = &map_entry->value;
+
+    // Wrap the text into buffer
+    i32 line_count = 1;
+    f32 max_line_width = 0;
+    
+    PROFILE("Wrapping text")
+    {
+        wrap_text(gc.font, text, (float)(max_width - 10), 
+                  state->buffer, TEXT_BUFFER_MAX, 
+                  &line_count, &max_line_width);
+    }
+    
+    state->buffer_len = (i32)strlen(state->buffer);
+
+    i32 line_height = get_line_height(gc.font);
+    
+    i32 total_height = line_count * line_height + 10;
+
+    ui_block_t *block = CHECK_PTR(ui_new_block(ctx, title, x, y, max_width, total_height, NO_LAYOUT));
+
+    block->bg_color = bg_color;
+    block->is_leaf = true;
+    block->custom_render = ui_render_text_label;
+
+    ui_add_child(ctx, block);
+}
 
 void ui_end_frame(ui_context_t *ctx)
 {
@@ -2845,7 +3036,6 @@ void render_mouse_stuff(void)
     // draw_circle_filled_aa(&gc.draw_buffer, gc.mouse_x, gc.mouse_y, 100, COLOR_CYAN);
     // draw_circle_aa(&gc.draw_buffer, gc.mouse_x, gc.mouse_y, 100, COLOR_CYAN);
     // draw_rounded_rectangle_filled_aa(&gc.draw_buffer, gc.mouse_x - 100, gc.mouse_y - 50, gc.mouse_x + 100, gc.mouse_y + 50, 20.0f, COLOR_CYAN);
-
 }
 
 ui_block_t *ui_block_find_by_id(ui_context_t *ctx, u32 block_id)
@@ -2858,6 +3048,207 @@ ui_block_t *ui_block_find_by_id(ui_context_t *ctx, u32 block_id)
         }
     }
     return NULL;
+}
+
+void menu_callback_new(void *data) {
+    printf("New selected!\n");
+}
+
+void menu_callback_open(void *data) {
+    printf("Open selected!\n");
+}
+
+void menu_callback_save(void *data) {
+    printf("Save selected!\n");
+}
+
+void menu_callback_exit(void *data) {
+    printf("Exit selected!\n");
+    gc.running = false;
+}
+
+void render_todo_screen(void)
+{
+    text_edit_state_t *text_state = NULL;
+
+    ui_begin_panel(gc.ui_ctx, "main panel", gc.side_panel_x, 0, gc.screen_width-gc.side_panel_x, gc.screen_height, VERTICAL_LAYOUT);
+
+        todo_list *curr_list = &main_list[gc.curr_list];
+
+        for(i32 i = 0; i < arrlen(curr_list->todo_items); i++)
+        {
+            // TODO : fix! this will lead to horrible bugs as we are depending
+            // that the pointers are stable when adding to the array may realloc
+            if(ui_checkbox(gc.ui_ctx, curr_list->todo_items[i].todo))
+            {
+                curr_list->todo_items[i].completed = true;
+            }
+        }
+
+        text_state = ui_text_edit(gc.ui_ctx, "TextEdit1", 0,0,200,"Add your task ..");
+
+        if(ui_button(gc.ui_ctx, "Submit"))
+        {
+            todo_item new_item = {0};
+            todo_item_add_content(&new_item, text_state->buffer);
+            todo_list_add(curr_list, &new_item);
+        }
+
+        // ui_slider(gc.ui_ctx, 0.0f, 100.0f, "slider test");
+
+    ui_end_panel(gc.ui_ctx);
+    
+    ui_begin_panel(gc.ui_ctx, "side_panel", 0, 0, gc.side_panel_x, gc.screen_height, VERTICAL_LAYOUT);
+
+        for(i32 i = 0; i < arrlen(main_list); i++){
+            ui_radio(gc.ui_ctx, main_list[i].name, &gc.curr_list, i);
+        }
+
+    ui_end_panel(gc.ui_ctx);
+
+    ui_layout(gc.ui_ctx);
+
+    ui_render(gc.ui_ctx);
+
+    reset_input_for_frame();
+}
+
+void render_layout_test_screen(void)
+{
+    text_edit_state_t *text_state = NULL;
+
+    PROFILE("Building UI Tree")
+    {
+        ui_begin_panel(gc.ui_ctx, "Root", gc.side_panel_x*gc.screen_width, 0, (1-gc.side_panel_x)*gc.screen_width, gc.screen_height, VERTICAL_LAYOUT);
+            ui_begin_panel(gc.ui_ctx, "Test1", 0, 0, 0, 100, HORIZONTAL_LAYOUT);
+                ui_begin_panel(gc.ui_ctx, "Test1-1", 0, 0, 100, 0, VERTICAL_LAYOUT);
+                ui_end_panel(gc.ui_ctx);
+                ui_begin_panel(gc.ui_ctx, "Test1-2", 0, 0, 50, 0, HORIZONTAL_LAYOUT);
+                ui_end_panel(gc.ui_ctx);
+                ui_button(gc.ui_ctx,"Buttton1");
+                ui_button(gc.ui_ctx,"Buttton2");
+            ui_end_panel(gc.ui_ctx);
+                
+            ui_begin_panel(gc.ui_ctx, "Test2", 0, 0, 0, 400, VERTICAL_LAYOUT);
+                ui_begin_panel(gc.ui_ctx, "Test2-1", 0, 0, 0, 50, HORIZONTAL_LAYOUT);
+                ui_end_panel(gc.ui_ctx);
+                ui_begin_panel(gc.ui_ctx, "Test2-2", 0, 0, 0, 100, VERTICAL_LAYOUT);
+                    ui_button(gc.ui_ctx,"test_but_1");
+                    ui_button(gc.ui_ctx,"test_but_2");
+                ui_end_panel(gc.ui_ctx);
+                ui_button(gc.ui_ctx,"Buton1");
+                ui_button(gc.ui_ctx,"Buton2");
+                ui_button(gc.ui_ctx,"Buton11");
+                ui_button(gc.ui_ctx,"Buton21");
+                ui_button(gc.ui_ctx,"Buton12");
+                ui_button(gc.ui_ctx,"Buton23");
+                ui_button(gc.ui_ctx,"Buton14");
+                ui_button(gc.ui_ctx,"Buton25");
+            ui_end_panel(gc.ui_ctx);
+            
+            ui_begin_panel(gc.ui_ctx, "Test3", 0, 0, 0, 300, VERTICAL_LAYOUT);
+                f32 val = ui_slider(gc.ui_ctx, 50.0f, 600.0f,"Slider");
+                text_state = ui_text_edit(gc.ui_ctx, "TextEdit1", 0,0,200,"Add your task ..");
+                ui_text_label(gc.ui_ctx, "MultiLine", 
+                "Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. ", 0, 0, val, HEX_TO_COLOR4(0x3d005c)); 
+            ui_end_panel(gc.ui_ctx);
+
+            ui_begin_panel(gc.ui_ctx, "Test4", 0, 0, 0, 300, NO_LAYOUT);
+                radial_menu_map_t *menu_state = ui_radial_menu(gc.ui_ctx, "testradial", 150,150 , 150);
+                static int once = 0;
+                if (menu_state && !once) {
+                    once = 1;
+                    radial_menu_add_item(&menu_state->value, "New", menu_callback_new, NULL);
+                    radial_menu_add_item(&menu_state->value, "Open", menu_callback_open, NULL);
+                    radial_menu_add_item(&menu_state->value, "Save", menu_callback_save, NULL);
+                    radial_menu_add_item(&menu_state->value, "Exit", menu_callback_exit, NULL);
+                }
+            ui_end_panel(gc.ui_ctx);
+
+        ui_end_panel(gc.ui_ctx);
+    }
+
+    PROFILE("UI Layout")
+    {
+        ui_layout(gc.ui_ctx);
+    }
+
+    PROFILE("UI Rendering")
+    {
+        ui_render(gc.ui_ctx);
+    }
+
+    reset_input_for_frame(); 
+}
+
+void render_debug_screen(void)
+{
+    render_frame_history_graph();
+    
+    rendered_text_tt frame_time = {
+        .font = gc.font,
+        .pos = {.x=gc.screen_width - (10+get_string_width(gc.font, frametime)), .y=0},
+        .color = COLOR_WHITE,
+        .string = frametime
+    };
+    
+    snprintf(frametime, BUFFER_SIZE, "%.2f ms", gc.average_frame_time*1000);
+    render_text_tt(&gc.draw_buffer, &frame_time);
+    
+    if(gc.profile)
+    {
+        render_prof_entries();
+    }
+
+    for(i32 i = gc.ui_ctx->block_count-1 ; i >= 0; i--)
+    {
+        if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->hot_block_id)
+        {
+            i32 screen_x, screen_y;
+            ui_block_to_screen_coords(gc.ui_ctx->blocks[i], gc.ui_ctx->blocks[i]->x, gc.ui_ctx->blocks[i]->y, &screen_x, &screen_y);
+            draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_GREEN:COLOR_RED);
+            draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->scissor_region.w, gc.ui_ctx->blocks[i]->scissor_region.h, (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_LIME:COLOR_YELLOW);
+            // draw_aaline(&gc.draw_buffer, screen_x, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
+            // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y+gc.ui_ctx->blocks[i]->h, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
+            // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
+            // draw_aaline(&gc.draw_buffer, screen_x, screen_y+gc.ui_ctx->blocks[i]->h, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
+        }
+    }
+
+    for(i32 i = gc.ui_ctx->block_count-1 ; i >= 0; i--)
+    {
+        if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id)
+        {
+            i32 screen_x, screen_y;
+            ui_block_to_screen_coords(gc.ui_ctx->blocks[i], gc.ui_ctx->blocks[i]->x, gc.ui_ctx->blocks[i]->y, &screen_x, &screen_y);
+            draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, COLOR_LIME);
+        }
+    }
+
+    render_mouse_stuff();
+}
+
+void render_floating_panel_test(void)
+{
+    text_edit_state_t *text_state = NULL;
+
+    PROFILE("Building UI Tree")
+    {
+        ui_begin_panel_floating(gc.ui_ctx, "Root", 200, 300, 400, 200);
+        ui_end_panel(gc.ui_ctx);
+    }
+
+    PROFILE("UI Layout")
+    {
+        ui_layout(gc.ui_ctx);
+    }
+
+    PROFILE("UI Rendering")
+    {
+        ui_render(gc.ui_ctx);
+    }
+
+    reset_input_for_frame(); 
 }
 
 void render_all(void)
@@ -2878,175 +3269,24 @@ void render_all(void)
     
     ui_new_frame(gc.ui_ctx);
 
-   /*  PROFILE("Building and rendering the ui")
+    render_todo_screen();
+
+    PROFILE("UI Layout")
     {
-        text_edit_state_t *text_state = NULL;
-
-        ui_begin_panel(gc.ui_ctx, "main panel", gc.side_panel_x, 0, gc.screen_width-gc.side_panel_x, gc.screen_height, VERTICAL_LAYOUT);
-
-            todo_list *curr_list = &main_list[gc.curr_list];
-
-            for(i32 i = 0; i < arrlen(curr_list->todo_items); i++)
-            {
-                // TODO : fix! this will lead to horrible bugs as we are depending
-                // that the pointers are stable when adding to the array may realloc
-                if(ui_checkbox(gc.ui_ctx, curr_list->todo_items[i].todo))
-                {
-                    curr_list->todo_items[i].completed = true;
-                }
-            }
-
-            text_state = ui_text_edit(gc.ui_ctx, "TextEdit1", "Add your task ..");
-
-            if(ui_button(gc.ui_ctx, "Submit"))
-            {
-                todo_item new_item = {0};
-                todo_item_add_content(&new_item, text_state->buffer);
-                todo_list_add(curr_list, &new_item);
-            }
-
-            // ui_slider(gc.ui_ctx, 0.0f, 100.0f, "slider test");
-
-        ui_end_panel(gc.ui_ctx);
-        
-        ui_begin_panel(gc.ui_ctx, "side_panel", 0, 0, gc.side_panel_x, gc.screen_height, VERTICAL_LAYOUT);
-
-            for(i32 i = 0; i < arrlen(main_list); i++){
-                ui_radio(gc.ui_ctx, main_list[i].name, &gc.curr_list, i);
-            }
-
-        ui_end_panel(gc.ui_ctx);
-
         ui_layout(gc.ui_ctx);
-
-        ui_render(gc.ui_ctx);
-
-        reset_input_for_frame();
-    } 
- */
-    PROFILE("Building and rendering the ui")
+    }
+    PROFILE("UI Rendering")
     {
-        text_edit_state_t *text_state = NULL;
+        ui_render(gc.ui_ctx);
+    }
+    reset_input_for_frame(); 
 
-        PROFILE("Building UI Tree")
-        {
-            ui_begin_panel(gc.ui_ctx, "Root", gc.side_panel_x*gc.screen_width, 0, (1-gc.side_panel_x)*gc.screen_width, gc.screen_height, VERTICAL_LAYOUT);
-                ui_begin_panel(gc.ui_ctx, "Test1", 0, 0, 0, 100, HORIZONTAL_LAYOUT);
-                    ui_begin_panel(gc.ui_ctx, "Test1-1", 0, 0, 100, 0, VERTICAL_LAYOUT);
-                    ui_end_panel(gc.ui_ctx);
-                    ui_begin_panel(gc.ui_ctx, "Test1-2", 0, 0, 50, 0, HORIZONTAL_LAYOUT);
-                    ui_end_panel(gc.ui_ctx);
-                    ui_button(gc.ui_ctx,"Buttton1");
-                    ui_button(gc.ui_ctx,"Buttton2");
-                ui_end_panel(gc.ui_ctx);
-                    
-                ui_begin_panel(gc.ui_ctx, "Test2", 0, 0, 0, 400, VERTICAL_LAYOUT);
-                    ui_begin_panel(gc.ui_ctx, "Test2-1", 0, 0, 0, 50, HORIZONTAL_LAYOUT);
-                    ui_end_panel(gc.ui_ctx);
-                    ui_begin_panel(gc.ui_ctx, "Test2-2", 0, 0, 0, 100, VERTICAL_LAYOUT);
-                        ui_button(gc.ui_ctx,"test_but_1");
-                        ui_button(gc.ui_ctx,"test_but_2");
-                    ui_end_panel(gc.ui_ctx);
-                    ui_button(gc.ui_ctx,"Buton1");
-                    ui_button(gc.ui_ctx,"Buton2");
-                    ui_button(gc.ui_ctx,"Buton11");
-                    ui_button(gc.ui_ctx,"Buton21");
-                    ui_button(gc.ui_ctx,"Buton12");
-                    ui_button(gc.ui_ctx,"Buton23");
-                    ui_button(gc.ui_ctx,"Buton14");
-                    ui_button(gc.ui_ctx,"Buton25");
-                ui_end_panel(gc.ui_ctx);
-                
-                ui_begin_panel(gc.ui_ctx, "Test3", 0, 0, 0, 300, VERTICAL_LAYOUT);
-                    ui_slider(gc.ui_ctx,0.0f, 100.0f,"Slider");
-                    text_state = ui_text_edit(gc.ui_ctx, "TextEdit1", "Add your task ..");
-                ui_end_panel(gc.ui_ctx);
-            ui_end_panel(gc.ui_ctx);
-        }
-
-        PROFILE("UI Layout")
-        {
-            ui_layout(gc.ui_ctx);
-        }
-
-        PROFILE("UI Rendering")
-        {
-            ui_render(gc.ui_ctx);
-        }
-
-        reset_input_for_frame(); 
-    }   
- 
-
-    // PROFILE("Building and rendering the ui")
-    // {
-    //     text_edit_state_t *text_state = NULL;
-
-    //     PROFILE("Building UI Tree")
-    //     {
-    //         ui_begin_panel_floating(gc.ui_ctx, "Root", 200, 300, 400, 200);
-    //         ui_end_panel(gc.ui_ctx);
-    //     }
-
-    //     PROFILE("UI Layout")
-    //     {
-    //         ui_layout(gc.ui_ctx);
-    //     }
-
-    //     PROFILE("UI Rendering")
-    //     {
-    //         ui_render(gc.ui_ctx);
-    //     }
-
-    //     reset_input_for_frame(); 
-    // }
  
     if(gc.debug)
     {
-        render_frame_history_graph();
-        
-        rendered_text_tt frame_time = {
-            .font = gc.font,
-            .pos = {.x=gc.screen_width - (10+get_string_width(gc.font, frametime)), .y=0},
-            .color = COLOR_WHITE,
-            .string = frametime
-        };
-        
-        snprintf(frametime, BUFFER_SIZE, "%.2f ms", gc.average_frame_time*1000);
-        render_text_tt(&gc.draw_buffer, &frame_time);
-        
-        if(gc.profile)
-        {
-            render_prof_entries();
-        }
-
-        for(i32 i = gc.ui_ctx->block_count-1 ; i >= 0; i--)
-        {
-            if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->hot_block_id)
-            {
-                i32 screen_x, screen_y;
-                ui_block_to_screen_coords(gc.ui_ctx->blocks[i], gc.ui_ctx->blocks[i]->x, gc.ui_ctx->blocks[i]->y, &screen_x, &screen_y);
-                draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_GREEN:COLOR_RED);
-                draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->scissor_region.w, gc.ui_ctx->blocks[i]->scissor_region.h, (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_LIME:COLOR_YELLOW);
-                // draw_aaline(&gc.draw_buffer, screen_x, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
-                // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y+gc.ui_ctx->blocks[i]->h, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
-                // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
-                // draw_aaline(&gc.draw_buffer, screen_x, screen_y+gc.ui_ctx->blocks[i]->h, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
-            }
-        }
-
-        for(i32 i = gc.ui_ctx->block_count-1 ; i >= 0; i--)
-        {
-            if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id)
-            {
-                i32 screen_x, screen_y;
-                ui_block_to_screen_coords(gc.ui_ctx->blocks[i], gc.ui_ctx->blocks[i]->x, gc.ui_ctx->blocks[i]->y, &screen_x, &screen_y);
-                draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, COLOR_LIME);
-            }
-        }
-
-        render_mouse_stuff();
+        render_debug_screen();
     }
+
     prof_buf_count = 0;
     
     if(gc.capture)
@@ -3228,13 +3468,14 @@ bool init_all(void)
     todo_list_new("Hobbies");
     todo_list_new("Work stuff");
     todo_list_new("Programming");
-    
+
     return true;
 }
 
 int main(void)
 {   
-    if(!init_all()){
+    if(!init_all())
+    {
         fprintf(stderr, "Error : Failed to initialize application");
         exit(EXIT_FAILURE);
     }

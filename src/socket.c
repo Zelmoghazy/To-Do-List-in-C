@@ -1,4 +1,113 @@
-#include "Socket.h"
+#include "socket.h"
+#include <wchar.h>
+
+
+/* Win32 Specific functions */
+#ifdef _WIN32
+
+    socket_handle create_overlapped_socket(int family, int socktype, int protocol)
+    {
+        /*
+            Create socket with WSA_FLAG_OVERLAPPED for IOCP compatibility
+            This is required for overlapped I/O operations used by IOCP
+        */
+        return WSASocketW(family, socktype, protocol, NULL, 0, WSA_FLAG_OVERLAPPED);
+    }
+
+    typedef struct 
+    {
+        OVERLAPPED overlapped;
+        SOCKET     accept_sock;
+        char       buffer[(sizeof(SOCKADDR_IN6)+16)*2];
+    } accept_ctx_t;
+
+    LPFN_ACCEPTEX g_AcceptEx = NULL;
+    LPFN_GETACCEPTEXSOCKADDRS g_GetAcceptExSockaddrs = NULL;
+    
+    /*
+        The function pointer for the AcceptEx function must be obtained
+        at run time by making a call to the WSAIoctl function with the SIO_GET_EXTENSION_FUNCTION_POINTER opcode specified.
+        The input buffer passed to the WSAIoctl function must contain WSAID_ACCEPTEX
+     */
+    int load_winsock_extensions(socket_handle s) 
+    {
+        if (g_AcceptEx) return 0; // already loaded
+
+        DWORD bytes = 0;
+        GUID guidAcceptEx = WSAID_ACCEPTEX;
+        GUID guidGetAddr  = WSAID_GETACCEPTEXSOCKADDRS;
+
+        if (WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER,
+                     &guidAcceptEx, sizeof(guidAcceptEx),
+                     &g_AcceptEx, sizeof(guidAcceptEx),
+                     &bytes, NULL, NULL) == SOCKET_ERROR) 
+        {
+            return -1;
+        }
+
+        if (WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER,
+                     &guidGetAddr, sizeof(guidGetAddr),
+                     &g_GetAcceptExSockaddrs, sizeof(g_GetAcceptExSockaddrs),
+                     &bytes, NULL, NULL) == SOCKET_ERROR) 
+        {
+            g_AcceptEx = NULL;
+            return -1;
+        }
+        return 0;
+    }
+
+    /*
+        The AcceptEx function combines several socket functions into a single API/kernel transition. 
+        The AcceptEx function, when successful, performs three tasks:
+            - A new connection is accepted.
+            - Both the local and remote addresses for the connection are returned.
+            - The first block of data sent by the remote is received.
+
+        The AcceptEx function uses overlapped I/O, unlike the accept function. 
+        If your application uses AcceptEx, it can service a large number of clients
+        with a relatively small number of threads. As with all overlapped Windows
+        functions, either Windows events or completion ports can be used as a 
+        completion notification mechanism.
+
+        Another key difference between the AcceptEx function and the accept function
+        is that AcceptEx requires the caller to already have two sockets:
+            - One that specifies the socket on which to listen.
+            - One that specifies the socket on which to accept the connection.
+    */
+    socket_handle socket_accept_overlapped(Socket *sock, accept_ctx_t* ctx)
+    {
+        if (!ctx){
+            return INVALID_SOCKET;
+        }
+
+        memset(ctx, 0, sizeof(*ctx));
+
+        ctx->accept_sock = WSASocketW(AF_INET6, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+
+        if (ctx->accept_sock == INVALID_SOCKET) {
+            return INVALID_SOCKET;
+        }
+
+        DWORD bytes = 0;
+        BOOL ok = g_AcceptEx(
+            sock->sockfd,
+            ctx->accept_sock,
+            ctx->buffer,
+            0,
+            sizeof(SOCKADDR_IN6)+16,
+            sizeof(SOCKADDR_IN6)+16,
+            &bytes,
+            &ctx->overlapped
+        );
+
+        if (!ok && WSAGetLastError() != WSA_IO_PENDING) 
+        {
+            closesocket(ctx->accept_sock);
+            return INVALID_SOCKET;
+        }
+        return ctx->accept_sock;
+    }
+#endif
 
 int socket_init(Socket *sock)
 {
@@ -6,13 +115,14 @@ int socket_init(Socket *sock)
         /*
             Before making any other windows sockets calls 
             you must init the windows sockets DLL by calling 
-            WSAStartup() 
+            WSAStartup() and specifying the highest version 
+            of the winsock specification used, latest is 2.2
          */
         WSADATA wsaData;
         int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
         if (result != 0) {
             fprintf(stderr, "WSAStartup failed: %d\n", WSAGetLastError());
-            WSACleanup();
+            socket_cleanup();
             return -1;
         }
 
@@ -41,96 +151,19 @@ void socket_close(Socket *sock)
     #endif
 }
 
-void socket_cleanup()
+void socket_cleanup(void)
 {
     #ifdef _WIN32
-    /* WSACleanup terminates Windows Sockets operations for all threads. */
+        /* 
+           WSACleanup terminates Windows Sockets
+           operations for all threads. 
+        */
         WSACleanup();
     #else
     #endif
 }
 
-#ifdef _WIN32
-
-    typedef struct 
-    {
-        OVERLAPPED overlapped;
-        SOCKET     accept_sock;
-        char       buffer[(sizeof(SOCKADDR_IN6)+16)*2];
-    } accept_ctx_t;
-
-    static LPFN_ACCEPTEX g_AcceptEx = NULL;
-    static LPFN_GETACCEPTEXSOCKADDRS g_GetAcceptExSockaddrs = NULL;
-    
-    static int load_winsock_extensions(socket_handle s) 
-    {
-        if (g_AcceptEx) return 0; // already loaded
-
-        DWORD bytes = 0;
-        GUID guidAcceptEx = WSAID_ACCEPTEX;
-        GUID guidGetAddr   = WSAID_GETACCEPTEXSOCKADDRS;
-
-        if (WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER,
-                     &guidAcceptEx, sizeof(guidAcceptEx),
-                     &g_AcceptEx, sizeof(guidAcceptEx),
-                     &bytes, NULL, NULL) == SOCKET_ERROR) {
-            return -1;
-        }
-
-        if (WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER,
-                     &guidGetAddr, sizeof(guidGetAddr),
-                     &g_GetAcceptExSockaddrs, sizeof(g_GetAcceptExSockaddrs),
-                     &bytes, NULL, NULL) == SOCKET_ERROR) {
-            g_AcceptEx = NULL;
-            return -1;
-        }
-        return 0;
-    }
-    static socket_handle create_overlapped_socket(int family, int socktype, int protocol)
-    {
-        /*
-            Create socket with WSA_FLAG_OVERLAPPED for IOCP compatibility
-            This is required for overlapped I/O operations used by IOCP
-        */
-        return WSASocketW(family, socktype, protocol, NULL, 0, WSA_FLAG_OVERLAPPED);
-    }
-
-    socket_handle socket_accept_overlapped(Socket *sock, accept_ctx_t* ctx)
-    {
-        if (!ctx){
-            return INVALID_SOCKET;
-        }
-
-        memset(ctx, 0, sizeof(*ctx));
-
-        ctx->accept_sock = WSASocket(AF_INET6, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
-
-        if (ctx->accept_sock == INVALID_SOCKET) {
-            return INVALID_SOCKET;
-        }
-
-        DWORD bytes = 0;
-        BOOL ok = g_AcceptEx(
-            sock->sockfd,
-            ctx->accept_sock,
-            ctx->buffer,
-            0,
-            sizeof(SOCKADDR_IN6)+16,
-            sizeof(SOCKADDR_IN6)+16,
-            &bytes,
-            &ctx->overlapped
-        );
-
-        if (!ok && WSAGetLastError() != WSA_IO_PENDING) 
-        {
-            closesocket(ctx->accept_sock);
-            return INVALID_SOCKET;
-        }
-        return ctx->accept_sock;
-    }
-#endif
-
-void socket_tcp_socket(Socket *sock, const char *ip, const char *port)
+int socket_tcp_socket(Socket *sock, const char *ip, const char *port)
 {
 #ifdef _WIN32
    struct addrinfo hints, *res, *p;
@@ -145,7 +178,7 @@ void socket_tcp_socket(Socket *sock, const char *ip, const char *port)
     if ((err = getaddrinfo(ip, port, &hints, &res)) != 0) 
     {
         fprintf(stderr, "getaddrinfo error: %s\n", gai_strerrorA(err));
-        return;
+        return -1;
     }
 
     char last_error[256] = {0};
@@ -158,7 +191,9 @@ void socket_tcp_socket(Socket *sock, const char *ip, const char *port)
     for(p = res; p != NULL; p = p->ai_next) 
     {
         // Create a TCP/IP stream socket
-        sock->sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        // MSDN say using socket() The socket that is created will have the overlapped attribute as a default.
+        // found conflicting info online so I will just be safe
+        sock->sockfd = create_overlapped_socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 
         if (sock->sockfd == INVALID_SOCKET) 
         {
@@ -168,9 +203,6 @@ void socket_tcp_socket(Socket *sock, const char *ip, const char *port)
 
         // Non-blocking IO
         socket_set_non_blocking(sock->sockfd);
-
-        // Prevent the "Address already in use" error message
-        socket_set_opt_reuse_addr(sock->sockfd, 1);
 
         // bind the port to the socket
         if (bind(sock->sockfd, p->ai_addr, (int)p->ai_addrlen) == SOCKET_ERROR) 
@@ -188,10 +220,12 @@ void socket_tcp_socket(Socket *sock, const char *ip, const char *port)
     // didnt bind
     if(p == NULL){
         fprintf(stderr, "Failed to bind to any address. Last error: %s\n", last_error);
-        return;
+        return -1;
     }
 
     strncpy_s(sock->port, PORT_BUFFER_SIZE, port, _TRUNCATE);   
+
+    return 0;
 #else
     struct addrinfo hints, *res, *p;
 
@@ -254,7 +288,7 @@ void socket_tcp_socket(Socket *sock, const char *ip, const char *port)
 #endif
 }
 
-void socket_listen_connection(Socket *sock)
+int socket_listen_connection(Socket *sock)
 {
 #ifdef _WIN32
     /* Convert socket to listening socket */
@@ -262,8 +296,15 @@ void socket_listen_connection(Socket *sock)
     {          
         closesocket(sock->sockfd);
         fprintf(stderr, "Listen failed: %d\n", WSAGetLastError());
-        return;
+        return -1;
     }
+
+    if(load_winsock_extensions(sock->sockfd) < 0)
+    {
+        fprintf(stderr, "WSAIoctl failed with error: %u\n", WSAGetLastError());
+        closesocket(sock->sockfd);
+        return -1;
+    }    
 
     char hostname[HOSTNAME_BUFFER_SIZE];
     char ipaddr[INET6_ADDRSTRLEN];
@@ -289,6 +330,7 @@ void socket_listen_connection(Socket *sock)
     
     printf("Server listening on %s http://%s:%s\n", hostname, ipaddr, sock->port);
 #endif
+    return 0;
 }
 
 socket_handle socket_accept_connection(Socket *sock)
@@ -304,10 +346,17 @@ socket_handle socket_accept_connection(Socket *sock)
     if (connfd == INVALID_SOCKET) 
     {
         int error = WSAGetLastError();
-        if (error != WSAEWOULDBLOCK) {
-            fprintf(stderr, "Accept error: %d\n", error);
+        if (error == WSAEWOULDBLOCK || error == WSAEINTR) 
+        {
+            // normal accept doesnt block
+            return INVALID_SOCKET;
         }
-        return INVALID_SOCKET;
+        else
+        {
+            // actual error occured
+            fprintf(stderr, "Accept error: %d\n", error);
+            return INVALID_SOCKET;
+        }
     }
 
     // char client_ip[INET6_ADDRSTRLEN];
@@ -352,7 +401,7 @@ socket_handle socket_connect(const char *ip, const char *port)
         return INVALID_SOCKET;
     }
     
-    socket_handle sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    socket_handle sockfd = create_overlapped_socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 
     if (sockfd == INVALID_SOCKET) 
     {
@@ -364,7 +413,8 @@ socket_handle socket_connect(const char *ip, const char *port)
     if (connect(sockfd, res->ai_addr, (int)res->ai_addrlen) == SOCKET_ERROR) 
     {
         int error = WSAGetLastError();
-        if (error != WSAEWOULDBLOCK) {
+        if (error != WSAEWOULDBLOCK) 
+        {
             fprintf(stderr, "Failed to connect to server: %d\n", error);
             closesocket(sockfd);
             freeaddrinfo(res);
@@ -408,7 +458,7 @@ socket_handle socket_connect(const char *ip, const char *port)
 #endif
 }
 
-socket_handle socket_get_socket(const Socket *sock)
+socket_handle socket_get_handle(const Socket *sock)
 {
     return sock->sockfd;
 }
@@ -416,7 +466,7 @@ socket_handle socket_get_socket(const Socket *sock)
 char* socket_get_host_ip_addr(char *buffer, size_t bufsize)
 {
 #ifdef _WIN32
-/* https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getadaptersaddresses?redirectedfrom=MSDN */
+    /* https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getadaptersaddresses?redirectedfrom=MSDN */
     PIP_ADAPTER_ADDRESSES pAddresses = NULL;
     PIP_ADAPTER_ADDRESSES pCurrAddresses = NULL;
     PIP_ADAPTER_UNICAST_ADDRESS pUnicast = NULL;
@@ -455,42 +505,62 @@ char* socket_get_host_ip_addr(char *buffer, size_t bufsize)
 
     if (dwRetVal == NO_ERROR) 
     {
-        // If successful, output some information from the data we received
+        // If successful, iterate the linked list
         pCurrAddresses = pAddresses;
         while (pCurrAddresses) 
         {
-            // Skip loopback adapters
-            if (pCurrAddresses->IfType != IF_TYPE_SOFTWARE_LOOPBACK) 
+            if ((pCurrAddresses->IfType == IF_TYPE_ETHERNET_CSMACD ||
+                pCurrAddresses->IfType == IF_TYPE_IEEE80211) &&  
+                pCurrAddresses->OperStatus == IfOperStatusUp)
             {
-                pUnicast = pCurrAddresses->FirstUnicastAddress;
-                while (pUnicast != NULL) 
+                BOOL isVirtual = FALSE;
+                if (pCurrAddresses->Description) {
+                    // Check for common virtual adapter keywords
+                    if (wcsstr(pCurrAddresses->Description, L"Virtual") ||
+                        wcsstr(pCurrAddresses->Description, L"Hyper-V") ||
+                        wcsstr(pCurrAddresses->Description, L"VMware") ||
+                        wcsstr(pCurrAddresses->Description, L"VirtualBox") ||
+                        wcsstr(pCurrAddresses->Description, L"WSL") ||
+                        wcsstr(pCurrAddresses->Description, L"vEthernet")) {
+                        isVirtual = TRUE;
+                    }
+                }
+                if(!isVirtual)
                 {
-                    /* Protocol Independent */
-                    if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) 
+                    // get unicast addresses
+                    pUnicast = pCurrAddresses->FirstUnicastAddress;
+
+                    while (pUnicast != NULL) 
                     {
-                        struct sockaddr_in *sa_in = (struct sockaddr_in *)pUnicast->Address.lpSockaddr;
-                        char addressBuffer[INET_ADDRSTRLEN];
-                        inet_ntop(AF_INET, &(sa_in->sin_addr), addressBuffer, INET_ADDRSTRLEN);
-                        
-                        // Skip the loopback address and take the first non-loopback IPv4 address
-                        if (strcmp(addressBuffer, "127.0.0.1") != 0) {
-                            strncpy_s(buffer, bufsize, addressBuffer, _TRUNCATE);
-                            goto cleanup;
+                        /* Protocol Independent */
+                        if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) 
+                        {
+                            struct sockaddr_in *sa_in = (struct sockaddr_in *)pUnicast->Address.lpSockaddr;
+                            char addressBuffer[INET_ADDRSTRLEN];
+                            inet_ntop(AF_INET, &(sa_in->sin_addr), addressBuffer, INET_ADDRSTRLEN);
+                            
+                            // Skip the loopback address and take the first non-loopback IPv4 address
+                            if (strcmp(addressBuffer, "127.0.0.1") != 0 &&
+                                strncmp(addressBuffer, "169.254.", 8) != 0) 
+                            {
+                                strncpy_s(buffer, bufsize, addressBuffer, _TRUNCATE);
+                                goto cleanup;
+                            }
                         }
-                    }
-                    else if (pUnicast->Address.lpSockaddr->sa_family == AF_INET6) 
-                    {
-                        struct sockaddr_in6 *sa_in6 = (struct sockaddr_in6 *)pUnicast->Address.lpSockaddr;
-                        char addressBuffer[INET6_ADDRSTRLEN];
-                        inet_ntop(AF_INET6, &(sa_in6->sin6_addr), addressBuffer, INET6_ADDRSTRLEN);
-                        
-                        // Skip loopback address and link-local addresses
-                        if (strncmp(addressBuffer, "::1", 3) != 0 && 
-                            strncmp(addressBuffer, "fe80:", 5) != 0) {
-                            strncpy_s(buffer, bufsize, addressBuffer, _TRUNCATE);
+                        else if (pUnicast->Address.lpSockaddr->sa_family == AF_INET6) 
+                        {
+                            struct sockaddr_in6 *sa_in6 = (struct sockaddr_in6 *)pUnicast->Address.lpSockaddr;
+                            char addressBuffer[INET6_ADDRSTRLEN];
+                            inet_ntop(AF_INET6, &(sa_in6->sin6_addr), addressBuffer, INET6_ADDRSTRLEN);
+                            
+                            // Skip loopback address and link-local addresses
+                            if (strncmp(addressBuffer, "::1", 3) != 0 && 
+                                strncmp(addressBuffer, "fe80:", 5) != 0) {
+                                strncpy_s(buffer, bufsize, addressBuffer, _TRUNCATE);
+                            }
                         }
+                        pUnicast = pUnicast->Next;
                     }
-                    pUnicast = pUnicast->Next;
                 }
             }
             pCurrAddresses = pCurrAddresses->Next;
@@ -571,7 +641,8 @@ cleanup:
 char* socket_get_host_name(char *buffer, size_t bufsize)
 {
 #ifdef _WIN32
-    if (gethostname(buffer, (int)bufsize) == SOCKET_ERROR) {
+    if (gethostname(buffer, (int)bufsize) == SOCKET_ERROR) 
+    {
         fprintf(stderr, "gethostname error: %d\n", WSAGetLastError());
         strncpy_s(buffer, bufsize, "Error getting hostname", _TRUNCATE);
     }
@@ -646,10 +717,9 @@ typedef struct {
     uint16_t port;
 } SocketAddress;
 
-
 /* UDP */
 int socket_send_to(socket_handle sockfd, const SocketAddress *address, 
-                   const void *data, size_t length) 
+                   const void *data, int length) 
 {
     if (sockfd < 0 || length == 0 || data == NULL || address == NULL) {
         return 0;
@@ -676,7 +746,7 @@ int socket_send_to(socket_handle sockfd, const SocketAddress *address,
 }
 
 /* UDP */
-int socket_recv_from(socket_handle sockfd, SocketAddress *address, void *data, size_t length) 
+int socket_recv_from(socket_handle sockfd, SocketAddress *address, void *data, int length) 
 {
     if (sockfd < 0 || data == NULL) {
         return 0;
@@ -737,7 +807,7 @@ int socket_send(socket_handle sockfd, const void *data, size_t length)
     return ret;
 }
 
-int socket_recv(socket_handle sockfd, void *data, size_t length) 
+int socket_recv(socket_handle sockfd, void *data, int length) 
 {
     if (sockfd < 0 || data == NULL) {
         return 0;
@@ -761,110 +831,13 @@ int socket_recv(socket_handle sockfd, void *data, size_t length)
     return len;
 }
 
-int socket_wait(socket_handle sockfd, bool wait_read, bool wait_write, 
-                unsigned int timeout_ms) 
-{
-    fd_set fd_read, fd_write;
-    
-    FD_ZERO(&fd_read);
-    FD_ZERO(&fd_write);
-    
-    if (wait_read) {
-        FD_SET(sockfd, &fd_read);
-    }
-    if (wait_write) {
-        FD_SET(sockfd, &fd_write);
-    }
-
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-    int result = select(sockfd + 1, 
-                       wait_read ? &fd_read : NULL,
-                       wait_write ? &fd_write : NULL,
-                       NULL, &tv);
-
-    if (result < 0) {
-#ifdef _WIN32
-        fprintf(stderr, "select() failed: %d\n", WSAGetLastError());
-#else
-        fprintf(stderr, "select() failed: %s\n", strerror(errno));
-#endif
-    }
-
-    return result;
-}
-
-int socket_wait_multiple(socket_handle *sockets, bool *read_ready, 
-                        bool *write_ready, unsigned int count, 
-                        unsigned int timeout_ms) 
-{
-    if (count == 0 || sockets == NULL) {
-        return 0;
-    }
-
-    fd_set fd_read, fd_write;
-    socket_handle max_fd = 0;
-    
-    FD_ZERO(&fd_read);
-    FD_ZERO(&fd_write);
-
-    // Add sockets to fd_sets
-    for (unsigned int i = 0; i < count; i++) {
-        if (sockets[i] < 0) continue;
-
-        if (read_ready != NULL && read_ready[i]) {
-            FD_SET(sockets[i], &fd_read);
-        }
-        if (write_ready != NULL && write_ready[i]) {
-            FD_SET(sockets[i], &fd_write);
-        }
-
-        if (sockets[i] > max_fd) {
-            max_fd = sockets[i];
-        }
-    }
-
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-    int result = select(max_fd + 1, &fd_read, &fd_write, NULL, &tv);
-
-    if (result < 0) {
-#ifdef _WIN32
-        fprintf(stderr, "select() failed: %d\n", WSAGetLastError());
-#else
-        fprintf(stderr, "select() failed: %s\n", strerror(errno));
-#endif
-        return result;
-    }
-
-    // Update ready flags
-    for (unsigned int i = 0; i < count; i++) {
-        if (sockets[i] < 0) {
-            if (read_ready != NULL) read_ready[i] = false;
-            if (write_ready != NULL) write_ready[i] = false;
-            continue;
-        }
-
-        if (read_ready != NULL) {
-            read_ready[i] = FD_ISSET(sockets[i], &fd_read);
-        }
-        if (write_ready != NULL) {
-            write_ready[i] = FD_ISSET(sockets[i], &fd_write);
-        }
-    }
-
-    return result;
-}
-
 void socket_set_non_blocking(socket_handle fd)
 {
 #ifdef _WIN32
     /* 
         - set socket for nonblocking I/O
+        To put a socket into nonblocking mode, pass cmd as the constant FIONBIO
+        and point argp or lpInBuffer to a non-zero variable. 
         - I/O system calls that would block now will return SOCKET_ERROR
           and WSAGetLastError() will return WSAEWOULDBLOCK
     */
@@ -887,7 +860,12 @@ void socket_set_non_blocking(socket_handle fd)
 void socket_set_opt_reuse_addr(socket_handle sockfd, int on)
 {
 #ifdef _WIN32
-    // Prevent the "Address already in use" error message
+    /*
+    * Not the same behaviour on windows 
+    * Once the second socket has successfully bound, the behavior for all sockets bound to that port is indeterminate.
+    * For example, if all of the sockets on the same port provide TCP service, any incoming TCP connection requests 
+    * over the port cannot be guaranteed to be handled by the correct socket — the behavior is non-deterministic
+    */
     BOOL optval = on ? TRUE : FALSE;
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&optval, sizeof(optval)) == SOCKET_ERROR) {
         fprintf(stderr, "setsockopt error: socket_set_opt_reuse_addr %d\n", WSAGetLastError());
@@ -957,6 +935,8 @@ void socket_set_opt_tcp_fast_open(socket_handle sockfd, int qlen)
 void socket_set_opt_tcp_quick_ack(socket_handle sockfd, int on)
 {
 #ifdef _WIN32
+    (void)sockfd;
+    (void)on;
 #else
     int quickack = on ? 1 : 0;
     if (setsockopt(sockfd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack)) < 0) {

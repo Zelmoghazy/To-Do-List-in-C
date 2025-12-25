@@ -2,61 +2,73 @@
 #define EVENT_POLL_H
 
 #include "socket.h"
-#include <stdbool.h>
-#include <stdint.h>
-
-#ifdef _WIN32
-    #include <winsock2.h>
-    #include <windows.h>
-#else
-    #include <sys/epoll.h>
-#endif
 
 #define MAX_EVENTS      64
+#define EV_BUF_SIZE     8192
 
 #define EVENT_READ      0x01
 #define EVENT_WRITE     0x02
-#define EVENT_ET        0x04  // Edge-triggered
+#define EVENT_ET        0x04
 #define EVENT_ONESHOT   0x08
 
-typedef struct event_poll_t event_poll_t;
+typedef void (*on_accept_cb)(void *user_data, socket_handle client_fd);
+typedef void (*on_receive_cb)(void *user_data, socket_handle fd, const char *buffer, size_t len);
+typedef void (*on_send_cb)(void *user_data, socket_handle fd, size_t bytes_sent);
+typedef void (*on_disconnect_cb)(void *user_data, socket_handle fd);
+typedef void (*on_error_cb)(void *user_data, socket_handle fd, int error_code);
 
-typedef void (*event_callback)(void *user_data, uint32_t events);
+typedef struct {
+    on_accept_cb        on_accept;
+    on_receive_cb       on_receive;
+    on_send_cb          on_send;
+    on_disconnect_cb    on_disconnect;
+    on_error_cb         on_error;
+} event_callbacks_t;
 
-struct event_poll_t 
-{
-    Socket listener;
 #ifdef _WIN32
-    HANDLE iocp;
-    socket_handle *sockets;
-    int socket_count;
-    int socket_capacity;
-#else
-    int epoll_fd;
+    extern LPFN_ACCEPTEX g_AcceptEx;
+    extern LPFN_GETACCEPTEXSOCKADDRS g_GetAcceptExSockaddrs;
 #endif
-    bool running;
-};
+
+typedef struct  
+{
+#ifdef _WIN32
+    HANDLE              iocp;
+#else
+    int                 epoll_fd;
+#endif
+    Socket              listener;
+    socket_handle       *sockets;
+    bool                running;
+    event_callbacks_t   *callbacks;
+}event_poll_t;
 
 typedef struct 
 {
-    void           *user_data; // custom ctx
-    event_poll_t   *ep;
-    socket_handle  fd;
-    event_callback callback;
-    uint32_t       events;
+#ifdef _WIN32
+    // IOCPContext
+    OVERLAPPED      overlapped;             // must be the first member for the CONTAINING_RECORD trick
+    WSABUF          wsa_buf;
+    char            buffer[EV_BUF_SIZE];
+    size_t          send_len;
+    int             operation_type;         // 0 = recv, 1 = send, 2 = accept
+#endif
+    socket_handle   fd;
+    event_poll_t    *ep;
+    uint32_t        events;
+    void            *user_data; // custom ctx
 } event_ctx_t;
 
-event_poll_t event_poll_create(const char *ip, const char *port);
+
+#ifdef _WIN32
+event_poll_t *event_poll_create(const char *ip, const char *port);
 void event_poll_destroy(event_poll_t *ep);
-int event_poll_register_ctx(event_poll_t *ep, socket_handle fd, void *user_data, uint32_t events, event_callback callback);
+int post_recv(event_ctx_t *ctx);
+int post_accept(event_poll_t *ep, void *user_data);
 
-int event_poll_register(event_poll_t *ep, socket_handle fd, void *user_data, 
-                        uint32_t events, event_callback callback);
-int event_poll_modify(event_poll_t *ep, socket_handle fd, uint32_t events);
-int event_poll_remove(event_poll_t *ep, socket_handle fd);
 
-void event_poll_loop(event_poll_t *ep, event_callback new_conn_handler);
 
-void event_poll_stop(event_poll_t *ep);
+
+#endif
 
 #endif // EVENT_POLL_H

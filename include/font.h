@@ -72,6 +72,8 @@ void render_glyph_to_buffer_tt_scissored(font_tt *font, u32 codepoint,
 float get_string_width(font_tt *font, const char *text);
 float get_char_width(font_tt *font, char c);
 int get_line_height(font_tt *font);
+void wrap_text(font_tt *font, const char *text, float max_width, char *out, size_t out_len, int *line_n, float *max_line_w);
+
 void render_text_tt(image_view_t *color_buf, rendered_text_tt *text);
 void render_text_tt_scissored(image_view_t *color_buf, rendered_text_tt *text);
 void render_text_simple(image_view_t *color_buf, font_tt *font, const char *text, float x, float y, color4_t color);

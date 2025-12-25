@@ -81,6 +81,7 @@ typedef struct
 #define IS_OPAQUE(c) (c.a == 255)
 #define IS_INVIS(c) (c.a == 0)
 
+#define COLOR_TRANSPARENT   (color4_t){0, 0, 0, 0}
 #define COLOR_RED           (color4_t){255, 0, 0, 255}
 #define COLOR_GREEN         (color4_t){0, 255, 0, 255}
 #define COLOR_BLUE          (color4_t){0, 0, 255, 255}
@@ -184,9 +185,20 @@ void draw_rounded_rect_scissored(image_view_t *img, i32 x, i32 y, i32 width, i32
 void clear_scissor_stack();
 
 void polar_to_cartesian(polar_t polar, f32 center_x, f32 center_y, f32 scale_x, f32 scale_y, f32 *out_x, f32 *out_y);
+void cartesian_to_polar(f32 x, f32 y,
+                        f32 center_x, f32 center_y,
+                        f32 scale_x, f32 scale_y,
+                        polar_t *out_polar);
+f32 normalize_angle(f32 a);
+
 f32 radial_angle_step(i32 num_segments, f32 gap_factor);
 radial_segment_t radial_get_segment(radial_layout_t *layout, i32 i, f32 height);
+bool point_in_radial_segment(f32 px, f32 py, radial_layout_t *layout, radial_segment_t *seg);
 
+void draw_radial_segment_filled(image_view_t *img,
+                                radial_layout_t *layout, 
+                                 radial_segment_t *seg,
+                                 color4_t color) ;
 void catmull_rom_point(f32 t, vertex_t p[4], vertex_t *out);
 
 #endif

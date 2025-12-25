@@ -36,30 +36,30 @@
 #define M_PI                        3.14159265358979323846
 #define M_PI_2                      1.57079632679489661923
 
-#define ArrayCount(x) ((sizeof(x))/(sizeof((x)[0])))
+#define ArrayCount(x)               ((sizeof(x))/(sizeof((x)[0])))
 
-#define IntFromPtr(p) (u64)((u8*)p - (u8*)0)
-#define PtrFromInt(n) (void*)((u8*)0 + (n))
+#define IntFromPtr(p)               (u64)((u8*)p - (u8*)0)
+#define PtrFromInt(n)               (void*)((u8*)0 + (n))
 
-#define Member(T,m) (((T*)0)->m)
-#define OffsetOfMember(T,m) IntFromPtr(&Member(T,m))
+#define Member(T,m)                 (((T*)0)->m)
+#define OffsetOfMember(T,m)         IntFromPtr(&Member(T,m))
 
-#define MemoryZero(p,z)        memset((p), 0, (z))
-#define MemoryZeroStruct(p)    MemoryZero((p), sizeof(*(p)))
-#define MemoryZeroArray(p)     MemoryZero((p), sizeof(p))
-#define MemoryZeroTyped(p,c)   MemoryZero((p), sizeof(*(p))*(c))
+#define MemoryZero(p,z)             memset((p), 0, (z))
+#define MemoryZeroStruct(p)         MemoryZero((p), sizeof(*(p)))
+#define MemoryZeroArray(p)          MemoryZero((p), sizeof(p))
+#define MemoryZeroTyped(p,c)        MemoryZero((p), sizeof(*(p))*(c))
 
-#define MemoryMatch(a,b,z)     (memcmp((a),(b),(z)) == 0)
+#define MemoryMatch(a,b,z)          (memcmp((a),(b),(z)) == 0)
 
-#define MemoryCopy(d,s,z)      memmove((d), (s), (z))
-#define MemoryCopyStruct(d,s)  MemoryCopy((d),(s),\
-                               MIN(sizeof(*(d)),sizeof(*(s))))
+#define MemoryCopy(d,s,z)           memmove((d), (s), (z))
+#define MemoryCopyStruct(d,s)       MemoryCopy((d),(s),\
+                                    MIN(sizeof(*(d)),sizeof(*(s))))
 
-#define MemoryCopyArray(d,s)   MemoryCopy((d),(s),Min(sizeof(s),sizeof(d)))
-#define MemoryCopyTyped(d,s,c) MemoryCopy((d),(s),\
-                               MIN(sizeof(*(d)),sizeof(*(s)))*(c))
+#define MemoryCopyArray(d,s)        MemoryCopy((d),(s),Min(sizeof(s),sizeof(d)))
+#define MemoryCopyTyped(d,s,c)      MemoryCopy((d),(s),\
+                                    MIN(sizeof(*(d)),sizeof(*(s)))*(c))
 
-#define Stmnt(S)               do{ S }while(0)
+#define Stmnt(S)                    do{ S }while(0)
 
 #define DEBUG_PRT(fmt, ...)\
     do{\
@@ -156,6 +156,8 @@ const char* enum_strings[] = {
 #define FPS(n)                          (1000/n)
 
 #define MIDPOINT(start, end)            ((start) + ((end) - (start)) / 2)
+#define LEN_BETWEEN(start, end, include_end) \
+    ((end) >= (start) ? (size_t)((end) - (start)) + ((include_end) ? 1 : 0) : 0)
 
 #define RANGE_CONVERT(value, from_min, from_max, to_min, to_max) \
     (((value) - (from_min)) * ((to_max) - (to_min)) / ((from_max) - (from_min)) + (to_min))
@@ -164,6 +166,13 @@ const char* enum_strings[] = {
 
 #define WRAP_INDEX(pos, size)           (((pos) + (size)) % (size))
 #define INC_WRAP(pos, size)             (((pos) + (1)) % (size))
+#define IN_RANGE_WRAP(a,start,end)      (((end) < (start)) ? \
+                                         ((a) >= (start) || (a) <= (end)) : \
+                                         ((a) >= (start) && (a) <= (end)) )
+/* 
+    round n up to the nearest multiple of s
+ */
+#define ALIGN(n,s)                      (((n) + (s) - 1)/((s)))*((s))
 
 #define FRAND_MAX                       32767  
 

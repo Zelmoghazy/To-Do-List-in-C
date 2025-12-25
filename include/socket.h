@@ -5,19 +5,22 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef _WIN32
     #ifndef WIN32_LEAN_AND_MEAN
         #define WIN32_LEAN_AND_MEAN
     #endif
 
-    #include <windows.h>
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #include <iphlpapi.h>
+    #include <mswsock.h> 
+    #include <windows.h>
 #else
     #include <errno.h>
     #include <sys/socket.h>
+    #include <sys/epoll.h>
     #include <netinet/tcp.h> 
     #include <arpa/inet.h>
     #include <unistd.h> 
@@ -36,24 +39,25 @@
     typedef int socket_handle;
 #endif
 
+#ifdef _WIN32
+socket_handle create_overlapped_socket(int family, int socktype, int protocol);
+int load_winsock_extensions(socket_handle s);
+#endif
 
 typedef struct Socket {
     socket_handle sockfd;
     char port[PORT_BUFFER_SIZE];
 } Socket;
 
-// Initialize socket
 int socket_init(Socket *sock);
-
-// Cleanup socket
 void socket_cleanup();
 
 void socket_close(Socket *sock);
 
-void socket_tcp_socket(Socket *sock, const char *ip, const char *port);
-void socket_listen_connection(Socket *sock);
+int socket_tcp_socket(Socket *sock, const char *ip, const char *port);
+int socket_listen_connection(Socket *sock);
 socket_handle socket_accept_connection(Socket *sock);
-socket_handle socket_get_socket(const Socket *sock);
+socket_handle socket_get_handle(const Socket *sock);
 
 char* socket_get_host_ip_addr(char *buffer, size_t bufsize);
 char* socket_get_host_name(char *buffer, size_t bufsize);

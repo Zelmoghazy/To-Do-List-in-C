@@ -1355,6 +1355,262 @@ const char* get_file_extension(const char *filepath)
     return dot+1;
 }
 
+unsigned long get_page_size(void) 
+{
+    #ifdef _WIN32
+        SYSTEM_INFO sysinfo;
+        GetSystemInfo(&sysinfo);
+        return sysinfo.dwPageSize;
+    #else
+        return sysconf(_SC_PAGESIZE);
+    #endif
+}
+
+unsigned long get_allocation_granularity(void) 
+{
+    #ifdef _WIN32
+        SYSTEM_INFO sysinfo;
+        GetSystemInfo(&sysinfo);
+        return sysinfo.dwAllocationGranularity;
+    #else
+        return sysconf(_SC_PAGESIZE);
+    #endif
+}
+
+#ifdef _WIN32
+static PSYSTEM_LOGICAL_PROCESSOR_INFORMATION get_processor_info_buffer(DWORD* pCount) 
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = NULL;
+    DWORD dwSize = 0;
+    
+    GetLogicalProcessorInformation(pBuffer, &dwSize);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        return NULL;
+    }
+    
+    pBuffer = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION)malloc(dwSize);
+    if (!pBuffer) {
+        return NULL;
+    }
+    
+    if (!GetLogicalProcessorInformation(pBuffer, &dwSize)) {
+        free(pBuffer);
+        return NULL;
+    }
+    
+    if (pCount) {
+        *pCount = dwSize / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+    }
+    
+    return pBuffer;
+}
+
+int get_physical_core_count(void) 
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+    if (!pBuffer) return 0;
+    
+    int coreCount = 0;
+    DWORD byteOffset = 0;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+    
+    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) { // reasonable limit
+        if (ptr->Relationship == RelationProcessorCore) {
+            coreCount++;
+        }
+        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+        ptr++;
+    }
+    
+    free(pBuffer);
+    return coreCount;
+}
+
+int get_logical_processor_count(void) 
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+    if (!pBuffer) return 0;
+    
+    int logicalCount = 0;
+    DWORD byteOffset = 0;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+    
+    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+        if (ptr->Relationship == RelationProcessorCore) {
+            // Count bits in ProcessorMask to get number of logical processors for this core
+            ULONG_PTR mask = ptr->ProcessorMask;
+            while (mask) {
+                logicalCount += (mask & 1);
+                mask >>= 1;
+            }
+        }
+        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+        ptr++;
+    }
+    
+    free(pBuffer);
+    return logicalCount;
+}
+
+BOOL has_hyperthreading(void) 
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+    if (!pBuffer) return FALSE;
+    
+    BOOL hasHT = FALSE;
+    DWORD byteOffset = 0;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+    
+    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+        if (ptr->Relationship == RelationProcessorCore) {
+            // If Flags == 1, it's hyper-threaded
+            if (ptr->ProcessorCore.Flags == 1) {
+                hasHT = TRUE;
+                break;
+            }
+        }
+        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+        ptr++;
+    }
+    
+    free(pBuffer);
+    return hasHT;
+}
+
+
+int get_numa_node_count(void) 
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+    if (!pBuffer) return 0;
+    
+    int numaCount = 0;
+    DWORD byteOffset = 0;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+    
+    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+        if (ptr->Relationship == RelationNumaNode) {
+            numaCount++;
+        }
+        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+        ptr++;
+    }
+    
+    free(pBuffer);
+    return numaCount;
+}
+
+void get_cache_info(int cacheLevel, int* lineSize, DWORD64* size) 
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+    if (!pBuffer) {
+        if (lineSize) *lineSize = 0;
+        if (size) *size = 0;
+        return;
+    }
+    
+    DWORD byteOffset = 0;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+    
+    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+        if (ptr->Relationship == RelationCache) {
+            if (ptr->Cache.Level == cacheLevel) {
+                if (lineSize) *lineSize = ptr->Cache.LineSize;
+                if (size) *size = ptr->Cache.Size;
+                break;
+            }
+        }
+        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+        ptr++;
+    }
+    
+    free(pBuffer);
+}
+
+int get_socket_count(void) 
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+    if (!pBuffer) return 0;
+    
+    int socketCount = 0;
+    DWORD byteOffset = 0;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+    
+    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+        if (ptr->Relationship == RelationProcessorPackage) {
+            socketCount++;
+        }
+        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+        ptr++;
+    }
+    
+    free(pBuffer);
+    return socketCount;
+}
+
+void print_detailed_processor_info(void) 
+{
+    DWORD count = 0;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(&count);
+    if (!pBuffer) {
+        printf("Cannot get processor information\n");
+        return;
+    }
+    
+    int physicalCores = 0;
+    int logicalProcessors = 0;
+    
+    for (DWORD i = 0; i < count; i++) {
+        switch (pBuffer[i].Relationship) {
+            case RelationProcessorCore:
+                physicalCores++;
+                printf("Core %d: ", physicalCores);
+                if (pBuffer[i].ProcessorCore.Flags == 1) {
+                    printf("Hyper-Threaded ");
+                }
+                // Count logical processors in this core
+                int logicalInCore = 0;
+                ULONG_PTR mask = pBuffer[i].ProcessorMask;
+                while (mask) {
+                    logicalInCore += (mask & 1);
+                    mask >>= 1;
+                }
+                printf("(%d logical processors)\n", logicalInCore);
+                logicalProcessors += logicalInCore;
+                break;
+                
+            case RelationNumaNode:
+                printf("NUMA Node %d\n", pBuffer[i].NumaNode.NodeNumber);
+                break;
+                
+            case RelationCache:
+                printf("Cache: L%d, Size: %llu KB, Line: %d bytes\n",
+                       pBuffer[i].Cache.Level,
+                       pBuffer[i].Cache.Size / 1024,
+                       pBuffer[i].Cache.LineSize);
+                break;
+                
+            case RelationProcessorPackage:
+                printf("Physical Package/Socket\n");
+                break;
+        }
+    }
+    
+    printf("\nSummary:\n");
+    printf("  Physical Cores: %d\n", physicalCores);
+    printf("  Logical Processors: %d\n", logicalProcessors);
+    printf("  Sockets: %d\n", get_socket_count());
+    printf("  NUMA Nodes: %d\n", get_numa_node_count());
+    printf("  Hyper-Threading: %s\n", has_hyperthreading() ? "Enabled" : "Disabled");
+    
+    free(pBuffer);
+}
+#endif
 /* -------------------- Multithreading stuff -------------------- */
 
 int get_core_count(void) 

@@ -70,13 +70,14 @@ glyph_info_t* get_glyph(font_tt *font, u32 codepoint)
     }
 
     int glyph_index = stbtt_FindGlyphIndex(&font->info, codepoint);
+    // Returns 0 if the character codepoint is not defined in the font.
     if (glyph_index == 0) {
         codepoint = '?';
         glyph_index = stbtt_FindGlyphIndex(&font->info, codepoint);
     }
     
     int advance, left_bearing;
-    stbtt_GetCodepointHMetrics(&font->info, codepoint, &advance, &left_bearing);
+    stbtt_GetGlyphHMetrics(&font->info, glyph_index, &advance, &left_bearing); 
     
     glyph->advance = advance * font->scale;
     
@@ -87,6 +88,9 @@ glyph_info_t* get_glyph(font_tt *font, u32 codepoint)
     if (bitmap == NULL) {
         glyph->w = glyph->h = 0;
         glyph->bitmap = NULL;
+        glyph->bearing_x = 0;
+        glyph->bearing_y = 0;
+        font->cache_valid[cache_index] = 1; 
         return glyph;
     }
 
@@ -259,7 +263,7 @@ void render_text_tt_scissored(image_view_t *color_buf, rendered_text_tt *text)
     {
         if (*string == '\n') 
         {
-            y += line_height ;
+            y += line_height;
             x = original_x;
             string++;
             continue;
@@ -301,8 +305,9 @@ void render_text_simple(image_view_t *color_buf, font_tt *font,
 float get_char_width(font_tt *font, char c)
 {
     glyph_info_t *glyph = get_glyph(font, c);
-    if(!glyph)
+    if(!glyph){
         return 0.0f;
+    }
 
     return glyph->advance;
 }
@@ -332,6 +337,332 @@ int get_line_height(font_tt *font)
     return font->ascent - font->descent + font->line_gap;
 }
 
+static inline void copy_text_segment(char* dest, size_t* dest_idx, 
+                                     const char* src, size_t src_len) 
+{
+    if (src_len > 0) {
+        memcpy(dest + *dest_idx, src, src_len);
+        *dest_idx += src_len;
+    }
+}
+
+/*
+    The basic idea is very simple just tokenize your string into words 
+    and calculate the size of each word and accumulate the line width
+    if adding the word exceeds the max width push newline character 
+ */
+void wrap_text(font_tt *font, const char *text, float max_width, char *out, size_t out_len, int *line_n, float *max_line_w)
+{
+    if (!font || !text || max_width <= 0) 
+    {
+        snprintf(out, out_len, "(null)");
+    }
+    
+    // size_t text_len = strlen(text);
+    // out_len = text_len * 2 + 1
+    
+    size_t out_idx = 0;
+    float current_line_width = 0.0f;
+    float max_line_width_used = 0.0f;
+    int line_count = 1;
+    
+    float space_width = get_char_width(font, ' ');
+    
+    const char *word_start = text;
+    const char *ptr = text;
+    
+    while (*ptr) 
+    {
+        /*
+            When encountering a newline 
+            Copy everything up to and including the newline
+        */
+        if (*ptr == '\n') 
+        {
+            size_t len = LEN_BETWEEN(word_start, ptr, true); // newline is included
+            copy_text_segment(out, &out_idx, word_start, len);
+            
+            if (current_line_width > max_line_width_used) 
+            {
+                max_line_width_used = current_line_width;
+            }
+
+            current_line_width = 0.0f;
+            line_count++;
+            
+            ptr++;
+            word_start = ptr;
+            continue;
+        }
+        
+        // Get the next word
+        const char *word_end = ptr;
+        while (*word_end && 
+               *word_end != ' ' &&
+               *word_end != '\n') 
+        {
+            word_end++;
+        }
+        
+        // get its width
+        float word_width = 0.0f;
+        for (const char *c = ptr; c < word_end; c++) {
+            word_width += get_char_width(font, *c);
+        }
+        
+        float test_width = current_line_width;
+        /*
+            if not at line start then account for space width 
+         */
+        if (current_line_width > 0) {
+            test_width += space_width; 
+        }
+        test_width += word_width;
+        
+        // it doesnt fit in current line
+        if (test_width > max_width &&
+            current_line_width > 0) 
+        {
+            // trailing space
+            if (out_idx > 0 &&
+                out[out_idx - 1] == ' ') 
+            {
+                out_idx--;
+            }
+            
+            // force newline
+            out[out_idx++] = '\n';
+            
+            if (current_line_width > max_line_width_used) {
+                max_line_width_used = current_line_width;
+            }
+            current_line_width = 0.0f;
+            line_count++;
+            
+            // Skip the space that would have preceded this word
+            if (*word_start == ' ') {
+                word_start++;
+                ptr = word_start;
+                continue;
+            }
+        }
+
+        size_t len = LEN_BETWEEN(word_start, word_end, false); // dont include space
+        copy_text_segment(out, &out_idx, word_start, len);
+
+        // Update line width
+        if (current_line_width > 0 &&
+            *word_start == ' ') 
+        {
+            current_line_width += space_width;
+        } 
+
+        current_line_width += word_width;
+        
+        ptr = word_end;
+        
+        // Handle space after word
+        if (*ptr == ' ') 
+        {
+            out[out_idx++] = ' ';
+            current_line_width += space_width; 
+            ptr++;
+        }
+        
+        word_start = ptr;
+    }
+    
+    out[out_idx] = '\0';
+    
+    if (current_line_width > max_line_width_used) 
+    {
+        max_line_width_used = current_line_width;
+    }
+    
+    *line_n = line_count;
+    *max_line_w = max_line_width_used;
+}
+
+typedef struct 
+{
+    int start_idx; 
+    int length;    
+    float width;   
+    int is_newline;
+} word_info_t;
+
+typedef struct 
+{
+    char *original_text;
+    word_info_t *words; 
+    int word_count;     
+    float space_width;  
+} text_layout_t;
+
+/*
+    If the text never changes we can precompute the width of each word
+ */
+text_layout_t* create_text_layout(font_tt *font, const char *text)
+{
+    if (!font || !text) return NULL;
+    
+    text_layout_t *layout = malloc(sizeof(text_layout_t));
+    if (!layout) return NULL;
+    
+    // Copy original text
+    layout->original_text = strdup(text);
+    if (!layout->original_text) {
+        free(layout);
+        return NULL;
+    }
+    
+    // Cache space width
+    layout->space_width = get_char_width(font, ' ');
+    
+    // Count words (rough estimate)
+    int estimated_words = 1;
+    for (const char *p = text; *p; p++) {
+        if (*p == ' ' || *p == '\n') estimated_words++;
+    }
+    
+    layout->words = malloc(sizeof(word_info_t) * estimated_words);
+    if (!layout->words) {
+        free(layout->original_text);
+        free(layout);
+        return NULL;
+    }
+    
+    layout->word_count = 0;
+    int idx = 0;
+    
+    while (text[idx]) {
+        // Handle explicit newline
+        if (text[idx] == '\n') {
+            // Store newline as special word
+            layout->words[layout->word_count].start_idx = idx;
+            layout->words[layout->word_count].length = 1;
+            layout->words[layout->word_count].width = 0.0f;
+            layout->words[layout->word_count].is_newline = 1;
+            layout->word_count++;
+            
+            idx++;
+            continue;
+        }
+        
+        // Find end of word
+        int word_start = idx;
+        while (text[idx] && text[idx] != ' ' && text[idx] != '\n') {
+            idx++;
+        }
+        
+        // Calculate and store word info
+        if (idx > word_start) {
+            float word_width = 0.0f;
+            for (int i = word_start; i < idx; i++) {
+                word_width += get_char_width(font, text[i]);
+            }
+            
+            layout->words[layout->word_count].start_idx = word_start;
+            layout->words[layout->word_count].length = idx - word_start;
+            layout->words[layout->word_count].width = word_width;
+            layout->words[layout->word_count].is_newline = 0;
+            layout->word_count++;
+        }
+        
+        // Skip spaces (don't store them as words)
+        while (text[idx] == ' ') idx++;
+    }
+    
+    return layout;
+}
+
+void wrap_text_const(text_layout_t *layout, float max_width, char *out, size_t out_len, int *line_n, float *max_line_w)
+{
+    
+    if (!layout || max_width <= 0) {
+        snprintf(out, out_len, "(null)");
+    }
+    
+    // Allocate output buffer (worst case: newline after every word)
+    //size_t max_size = strlen(layout->original_text) + layout->word_count + 1;
+    
+    size_t out_idx = 0;
+    float current_line_width = 0.0f;
+    float max_line_width_used = 0.0f;
+    int line_count = 1;
+    int at_line_start = 1;
+    
+    for (int i = 0; i < layout->word_count; i++) 
+    {
+        word_info_t *word = &layout->words[i];
+        
+        // Handle explicit newlines
+        if (word->is_newline) 
+        {
+            out[out_idx++] = '\n';
+            
+            if (current_line_width > max_line_width_used) {
+                max_line_width_used = current_line_width;
+            }
+            current_line_width = 0.0f;
+            line_count++;
+            at_line_start = 1;
+            continue;
+        }
+        
+        // Calculate width with this word
+        float test_width = current_line_width;
+        if (!at_line_start) {
+            test_width += layout->space_width;
+        }
+        test_width += word->width;
+        
+        // Need to wrap?
+        if (test_width > max_width && !at_line_start) {
+            out[out_idx++] = '\n';
+            
+            if (current_line_width > max_line_width_used) {
+                max_line_width_used = current_line_width;
+            }
+            current_line_width = 0.0f;
+            line_count++;
+            at_line_start = 1;
+        }
+        
+        // Add space before word if not at line start
+        if (!at_line_start) {
+            out[out_idx++] = ' ';
+            current_line_width += layout->space_width;
+        }
+        
+        // Copy word using index
+        copy_text_segment(out, &out_idx, layout->original_text + word->start_idx, word->length);
+        current_line_width += word->width;
+        at_line_start = 0;
+    }
+    
+    out[out_idx] = '\0';
+    
+    if (current_line_width > max_line_width_used) {
+        max_line_width_used = current_line_width;
+    }
+    
+    *line_n = line_count;
+    *max_line_w = max_line_width_used;
+}
+
+void free_text_layout(text_layout_t *layout)
+{
+    if (!layout) return;
+    
+    if (layout->original_text) {
+        free(layout->original_text);
+    }
+    if (layout->words) {
+        free(layout->words);
+    }
+    free(layout);
+}
 
 void utf8_decoder_init(utf8_decoder_t *decoder, const char *str)
 {

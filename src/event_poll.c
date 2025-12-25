@@ -1,35 +1,25 @@
 
+#include "socket.h"
 #include "event_poll.h"
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
 
-#ifndef _WIN32
-    #include <unistd.h>
-    #include <errno.h>
-#endif
+#define STB_DS_IMPLEMENTATION
+#include "../external/include/stb_ds.h"
 
 #ifdef _WIN32
 
-
-typedef struct 
+static bool has_pending_io(OVERLAPPED *overlapped)
 {
-    OVERLAPPED overlapped;
-    WSABUF wsa_buf;
-    char buffer[4096];
-    socket_handle fd;
-    void *user_data;
-    event_callback callback;
-} IOCPContext;
+    ULONG_PTR status = overlapped->Internal;
+    return (status == STATUS_PENDING || status == 0x00000103); // STATUS_PENDING
+}
 
 event_poll_t *event_poll_create(const char *ip, const char *port) 
 {
-    event_poll_t *ep = malloc(sizeof(event_poll_t));  // Heap allocation
+    event_poll_t *ep = calloc(1, sizeof(event_poll_t));
     if (!ep) {
-        fprintf(stderr, "Failed to allocate event_poll_t\n");
+        fprintf(stderr, "event_poll_create: Failed to allocate event_poll_t\n");
         return NULL;
     }
-    memset(ep, 0, sizeof(event_poll_t));
 
     if(socket_init(&ep->listener) < 0) 
     {
@@ -38,23 +28,36 @@ event_poll_t *event_poll_create(const char *ip, const char *port)
         return NULL;
     }
 
-    socket_tcp_socket(&ep->listener, ip, port);
-    socket_listen_connection(&ep->listener);
+    if(socket_tcp_socket(&ep->listener, ip, port) < 0)
+    {
+        fprintf(stderr, "event_poll_create: Failed to create a socket\n");
+        free(ep);
+        return NULL;
+    }
 
-    if (ep->listener.sockfd == INVALID_SOCKET) {
+    if(socket_listen_connection(&ep->listener) < 0)
+    {
+        fprintf(stderr, "event_poll_create: Listening failed\n");
+        free(ep);
+        return NULL;
+    }
+
+    if (ep->listener.sockfd == INVALID_SOCKET) 
+    {
         free(ep);
         return NULL;
     }
     /*
-        Create an I/O completion port, and associates a device
-        with an I/O completion port. 
+        Create an I/O completion port, and associates
+        a device with an I/O completion port. 
      */
     ep->iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE,
                                       NULL,
                                       0, 
                                       0); // number of concurrent threads, 0 -> as many as host machine CPUs
-    if (!ep->iocp) {
-        fprintf(stderr, "CreateIoCompletionPort failed: %lu\n", GetLastError());
+    if (!ep->iocp)
+    {
+        fprintf(stderr, "event_poll_create: CreateIoCompletionPort failed: %lu\n", GetLastError());
         socket_close(&ep->listener);
         free(ep);
         return NULL;
@@ -73,13 +76,18 @@ event_poll_t *event_poll_create(const char *ip, const char *port)
         Associate listener with IOCP
         by appending an entry to an existing completion port's device list. 
      */
-    CreateIoCompletionPort((HANDLE)socket_get_socket(&ep->listener), // handle of the device
-                          ep->iocp, // the handle of an existing completion port
-                          (ULONG_PTR)socket_get_socket(&ep->listener), // a completion key (OS doesnt care what)
-                          0);
+    if(!CreateIoCompletionPort((HANDLE)socket_get_handle(&ep->listener), // handle of the device
+                                ep->iocp, // the handle of an existing completion port
+                                socket_get_handle(&ep->listener), // a completion key (OS doesnt care what) typically used for user data
+                                0))
+    {
+        CloseHandle(ep->iocp);
+        socket_close(&ep->listener);
+        free(ep);
+        return NULL;
+    }
 
-    ep->socket_capacity = 16;
-    ep->sockets = (socket_handle*)calloc(ep->socket_capacity, sizeof(socket_handle));
+    ep->sockets = NULL;
     ep->running = true;
 
     return ep;
@@ -91,48 +99,157 @@ void event_poll_destroy(event_poll_t *ep)
 
     ep->running = false;
     
-    if (ep->sockets) {
-        free(ep->sockets);
+    if (ep->sockets) 
+    {
+        for (int i = 0; i < arrlen(ep->sockets); i++) 
+        {
+            if (ep->sockets[i] != INVALID_SOCKET) {
+                closesocket(ep->sockets[i]);
+            }
+        }
+        arrfree(ep->sockets);
+        ep->sockets = NULL;
     }
-    
+
     if (ep->iocp) {
         CloseHandle(ep->iocp);
     }
     
     socket_close(&ep->listener);
     free(ep);
+    socket_cleanup();
 }
 
-int event_poll_register(event_poll_t *ep, socket_handle fd, void *user_data, uint32_t events, event_callback callback) 
+/*
+    For overlapped sockets, WSARecv is used to post one or more buffers into which incoming data 
+    will be placed as it becomes available, after which the application-specified completion indication 
+    (invocation of the completion routine or setting of an event object) occurs.
+ */
+int post_recv(event_ctx_t *ctx)
+{
+    event_ctx_t *rcv_ctx = calloc(1, sizeof(event_ctx_t));
+    if (!rcv_ctx) return -1;
+
+    memcpy(rcv_ctx, ctx, sizeof(event_ctx_t));
+
+    memset(&rcv_ctx->overlapped, 0, sizeof(OVERLAPPED));
+
+    rcv_ctx->wsa_buf.buf    = rcv_ctx->buffer;
+    rcv_ctx->wsa_buf.len    = sizeof(rcv_ctx->buffer);
+    rcv_ctx->operation_type = 0;
+
+    DWORD flags = 0;
+    DWORD bytes_received = 0;
+
+    int ret = WSARecv(rcv_ctx->fd, 
+                      &rcv_ctx->wsa_buf,    // A pointer to an array of WSABUF structures.
+                      1,                // The number of WSABUF structures in the lpBuffers array.
+                      &bytes_received,  // The number, in bytes, of data received by this call
+                      &flags, 
+                      &rcv_ctx->overlapped, 
+                      NULL);            // A pointer to the completion routine
+
+    if (ret == SOCKET_ERROR) 
+    {
+        int error = WSAGetLastError();
+        // WSA_IO_PENDING is expected indicates that the overlapped operation has been successfully initiated
+        if (error != WSA_IO_PENDING) {
+            fprintf(stderr, "post_recv: WSARecv failed immediately: %d\n", error);
+            free(rcv_ctx);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int post_accept(event_poll_t *ep, void *user_data)
+{
+    event_ctx_t *ctx = calloc(1, sizeof(event_ctx_t));
+    ctx->fd = create_overlapped_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (ctx->fd == INVALID_SOCKET) {
+        fprintf(stderr, "post_accept: Create accept socket failed with error: %u\n", WSAGetLastError());
+        free(ctx);
+        return -1;
+    }
+
+    ctx->user_data = user_data;
+    ctx->ep = ep;
+    ctx->operation_type = 2; // accept operation
+
+    DWORD bytes = 0;
+    BOOL bRetVal = g_AcceptEx(ep->listener.sockfd, ctx->fd, 
+                              ctx->buffer, 0, //  If *dwReceiveDataLength* is zero, accepting the connection will not result in a receive operation. Instead, *AcceptEx* completes as soon as a connection arrives, without waiting for any data.
+                              64, 64,
+                              &bytes, &ctx->overlapped);
+
+    if (bRetVal == FALSE) 
+    {
+        int error = WSAGetLastError();
+        if (error != WSA_IO_PENDING) {
+            fprintf(stderr, "post_accept: AcceptEx failed: %d\n", error);
+            closesocket(ctx->fd);  // Don't close listener!
+            free(ctx);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int event_poll_send(event_poll_t *ep, socket_handle fd, const char *data, size_t len) 
+{
+    if (!ep || !data || len == 0) return -1;
+    
+    event_ctx_t *send_ctx = calloc(1, sizeof(event_ctx_t));
+    if (!send_ctx) return -1;
+    
+    send_ctx->fd = fd;
+    send_ctx->ep = ep;
+    
+    memset(&send_ctx->overlapped, 0, sizeof(OVERLAPPED));
+    memcpy(send_ctx->buffer, data, len);
+    send_ctx->wsa_buf.buf = send_ctx->buffer;
+    send_ctx->wsa_buf.len = (ULONG)len;
+    send_ctx->operation_type = 1;
+    
+    DWORD bytes_sent = 0;
+    int ret = WSASend(fd, &send_ctx->wsa_buf, 1, &bytes_sent, 0, 
+                      &send_ctx->overlapped, NULL);
+    
+    if (ret == SOCKET_ERROR) 
+    {
+        int error = WSAGetLastError();
+        if (error != WSA_IO_PENDING) {
+            fprintf(stderr, "WSASend failed: %d\n", error);
+            free(send_ctx);
+            return -1;
+        }
+    }
+    
+    return 0;
+}
+
+int event_poll_register(event_poll_t *ep, event_ctx_t *ctx) 
 {
     if (!ep) return -1;
 
     // Associate socket with IOCP
-    if (CreateIoCompletionPort((HANDLE)fd, ep->iocp, (ULONG_PTR)fd, 0) == NULL) {
+    if (CreateIoCompletionPort((HANDLE)ctx->fd, ep->iocp, (ULONG_PTR)ctx, 0) == NULL) 
+    {
+        fprintf(stderr, "CreateIoCompletionPort failed for socket: %lu\n", GetLastError());
+        free(ctx);
         return -1;
     }
 
     // Track socket
-    if (ep->socket_count >= ep->socket_capacity) 
-    {
-        ep->socket_capacity *= 2;
-        ep->sockets = (socket_handle*)realloc(ep->sockets, 
-                                              ep->socket_capacity * sizeof(socket_handle));
-    }
-    ep->sockets[ep->socket_count++] = fd;
+    arrput(ep->sockets, ctx->fd);
 
     // Post initial recv if reading
-    if (events & EVENT_READ) 
+    if(post_recv(ctx) < 0)
     {
-        IOCPContext *ctx = (IOCPContext*)calloc(1, sizeof(IOCPContext));
-        ctx->fd = fd;
-        ctx->user_data = user_data;
-        ctx->callback = callback;
-        ctx->wsa_buf.buf = ctx->buffer;
-        ctx->wsa_buf.len = sizeof(ctx->buffer);
-
-        DWORD flags = 0;
-        WSARecv(fd, &ctx->wsa_buf, 1, NULL, &flags, &ctx->overlapped, NULL);
+        fprintf(stderr, "Failed to post initial recv\n");
+        free(ctx);
+        return -1; 
     }
 
     return 0;
@@ -140,6 +257,9 @@ int event_poll_register(event_poll_t *ep, socket_handle fd, void *user_data, uin
 
 int event_poll_modify(event_poll_t *ep, socket_handle fd, uint32_t events) 
 {
+    (void)ep;
+    (void)fd;
+    (void)events;
     return 0;
 }
 
@@ -150,11 +270,10 @@ int event_poll_remove(event_poll_t *ep, socket_handle fd)
     }
 
     // Remove from tracked sockets
-    for (int i = 0; i < ep->socket_count; i++) 
+    for (int i = 0; i < arrlen(ep->sockets); i++) 
     {
-        if (ep->sockets[i] == fd) 
-        {
-            ep->sockets[i] = ep->sockets[--ep->socket_count];
+        if (ep->sockets[i] == fd) {
+            arrdel(ep->sockets, i);
             break;
         }
     }
@@ -163,24 +282,28 @@ int event_poll_remove(event_poll_t *ep, socket_handle fd)
     return 0;
 }
 
-void event_poll_loop(event_poll_t *ep, event_callback new_conn_handler, void *user_data) 
+void event_poll_loop(event_poll_t *ep, event_callbacks_t *callbacks, void *user_data) 
 {
-    DWORD bytes;
-    ULONG_PTR key;
-    OVERLAPPED *overlapped;
+    if (!ep || !callbacks) return;
+
+    ep->callbacks = callbacks;
+
+    // Post multiple pending accepts
+    for (int i = 0; i < 16; i++){
+        post_accept(ep, user_data);
+    }
+
+    printf("IOCP event loop started\n");
 
     while (ep->running) 
     {
-        // Check for new connections (non-blocking)
-        socket_handle new_fd = socket_accept_connection(&ep->listener);
-        if (new_fd != INVALID_SOCKET && new_conn_handler) 
-        {
-            socket_set_non_blocking(new_fd);
-            new_conn_handler(user_data, EVENT_READ);
-        }
+        DWORD      bytes = 0;
+        ULONG_PTR  key = 0;
+        OVERLAPPED *overlapped = NULL;
 
         // Wait for I/O completions
-        // put the calling thread to sleep until an entry appears in the specified completion port's I/O completion queue
+        // put the calling thread to sleep until an entry 
+        // appears in the specified completion port's I/O completion queue
         BOOL result = GetQueuedCompletionStatus(ep->iocp, // Monitored completion port
                                                 &bytes, // the number of bytes transferred
                                                 &key, // the completion key
@@ -188,47 +311,132 @@ void event_poll_loop(event_poll_t *ep, event_callback new_conn_handler, void *us
                                                 100); // specified time-out
         DWORD dwError = GetLastError();
 
-        if (!result)
-        {
-            if(overlapped)
-            {
-
-            }
-            else
-            {
-                if (dwError == WAIT_TIMEOUT) {
-                    // timed out
-                }
-                else
-                {
-                    // ??
-                }
-            }
+        if (!result && !overlapped && dwError == WAIT_TIMEOUT) {
             continue;
         }
 
-        IOCPContext *ctx = CONTAINING_RECORD(overlapped, IOCPContext, overlapped);
-
-        if (bytes > 0 && ctx->callback) 
-        {
-            ctx->callback(ctx->user_data, EVENT_READ);
+        // Shutdown signal (posted by event_poll_stop)
+        if (!result && !overlapped && bytes == 0 && key == 0) {
+            break;
         }
 
-        // Re-post recv if still active
-        if (bytes > 0) 
+        event_ctx_t *ctx = CONTAINING_RECORD(overlapped, event_ctx_t, overlapped);
+
+        if (!result) 
         {
-            memset(&ctx->overlapped, 0, sizeof(OVERLAPPED));
-            DWORD flags = 0;
-            int ret = WSARecv(ctx->fd, &ctx->wsa_buf, 1, NULL, &flags, &ctx->overlapped, NULL);
-            if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+            if (overlapped)
+            {
+                // I/O operation failed
+                if(dwError == ERROR_NETNAME_DELETED)
+                {
+                    fprintf(stderr, "The specified network name (%llu) is no longer available, probably disconnected\n", (unsigned long long) ctx->fd);
+                    if (ep->callbacks->on_disconnect) {
+                        ep->callbacks->on_disconnect(ctx->user_data, ctx->fd);
+                    }
+                }
+                else
+                {
+                    fprintf(stderr, "I/O operation failed for socket %llu, error: %lu\n", (unsigned long long) ctx->fd, dwError);
+
+                    if (ep->callbacks->on_error) {
+                        ep->callbacks->on_error(ctx->user_data, ctx->fd, dwError);
+                    }
+                }       
+                event_poll_remove(ep, ctx->fd);
+                free(ctx);
+                continue;
+            }
+        }
+        
+        // New Connection
+        if(ctx->operation_type == 2)
+        {
+            /*
+                When the AcceptEx function returns, the socket sAcceptSocket is in the 
+                default state for a connected socket. The socket sAcceptSocket does not
+                inherit the properties of the socket associated with sListenSocket 
+                parameter until SO_UPDATE_ACCEPT_CONTEXT is set on the socket. 
+                Use the setsockopt function to set the SO_UPDATE_ACCEPT_CONTEXT option,
+                specifying sAcceptSocket as the socket handle and sListenSocket as the option value.
+             */
+            SOCKET listen_fd = ep->listener.sockfd;
+            if(setsockopt(ctx->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
+                           (char *) &listen_fd,
+                           sizeof(listen_fd)) == SOCKET_ERROR)
+            {
+                fprintf(stderr, "SO_UPDATE_ACCEPT_CONTEXT failed: %d\n", WSAGetLastError());
                 closesocket(ctx->fd);
                 free(ctx);
+                post_accept(ep, user_data);
+                continue;
             }
-        } 
-        else 
-        {
-            closesocket(ctx->fd);
+
+            if (CreateIoCompletionPort((HANDLE)ctx->fd, ep->iocp,
+                                       (ULONG_PTR)ctx, 0) == NULL) 
+            {
+                fprintf(stderr,
+                        "CreateIoCompletionPort failed for socket: %lu\n",
+                        GetLastError());
+                closesocket(ctx->fd);
+                free(ctx);
+                post_accept(ep, user_data);
+                continue;
+            }
+
+            printf("New connection via AcceptEx: %llu\n", (unsigned long long)ctx->fd);
+
+            arrput(ep->sockets, ctx->fd);
+
+            if (ep->callbacks->on_accept) {
+                ep->callbacks->on_accept(ctx->user_data, ctx->fd);
+            }
+
+            post_recv(ctx);
+
+            // Post another accept to handle the next connection
+            post_accept(ep, ctx->user_data);
             free(ctx);
+            continue;
+        }
+
+        // Done Receiving
+        if(ctx->operation_type == 0)
+        {
+            if (bytes == 0) 
+            {
+                // Connection closed gracefully
+                printf("Client disconnected (fd: %llu)\n", (unsigned long long)ctx->fd);
+
+                if (ep->callbacks->on_disconnect) {
+                    ep->callbacks->on_disconnect(ctx->user_data, ctx->fd);
+                }
+                event_poll_remove(ep, ctx->fd);
+                free(ctx);
+                continue;
+            } 
+
+            // Data received successfully
+            printf("Received %lu bytes on socket %llu\n", bytes, (unsigned long long)ctx->fd);
+            
+            if (ep->callbacks->on_receive) {
+                ep->callbacks->on_receive(ctx->user_data, ctx->fd, ctx->buffer, bytes);
+            }
+
+            post_recv(ctx);
+            free(ctx);
+            continue;
+        }
+
+        // Done sending
+        if (ctx->operation_type == 1) 
+        {
+            printf("Sent %lu bytes on socket %llu\n", bytes, (unsigned long long)ctx->fd);
+            
+            if (ep->callbacks->on_send) {
+                ep->callbacks->on_send(ctx->user_data, ctx->fd, bytes);
+            }
+            free(ctx);
+            continue;
         }
     }
 }
@@ -237,6 +445,8 @@ void event_poll_stop(event_poll_t *ep)
 {
     if (ep) {
         ep->running = false;
+        // Post a completion packet to wake up GetQueuedCompletionStatus
+        PostQueuedCompletionStatus(ep->iocp, 0, 0, NULL);
     }
 }
 
@@ -244,7 +454,7 @@ void event_poll_stop(event_poll_t *ep)
 
 event_poll_t *event_poll_create(const char *ip, const char *port) 
 {
-    event_poll_t *ep = malloc(sizeof(event_poll_t));  // Heap allocation
+    event_poll_t *ep = malloc(sizeof(event_poll_t)); 
     if (!ep) {
         fprintf(stderr, "Failed to allocate event_poll_t\n");
         return NULL;

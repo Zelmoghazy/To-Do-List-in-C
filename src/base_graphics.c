@@ -1599,10 +1599,53 @@ void clear_scissor_stack(void)
     scissor_enabled = false;
 }
 
-void polar_to_cartesian(polar_t polar, f32 center_x, f32 center_y,  f32 scale_x, f32 scale_y, f32 *out_x, f32 *out_y) 
+void polar_to_cartesian(polar_t polar, f32 center_x, f32 center_y, 
+                        f32 scale_x, f32 scale_y, f32 *out_x, f32 *out_y) 
 {
     *out_x = center_x + (polar.radius * cosf(polar.angle)) * scale_x;
     *out_y = center_y + (polar.radius * sinf(polar.angle)) * scale_y;
+}
+
+void cartesian_to_polar(f32 x, f32 y,
+                        f32 center_x, f32 center_y,
+                        f32 scale_x, f32 scale_y,
+                        polar_t *out_polar)
+{
+    f32 dx = (x - center_x) / scale_x;
+    f32 dy = (y - center_y) / scale_y;
+
+    out_polar->radius = sqrtf(dx*dx + dy*dy);
+    out_polar->angle  = atan2f(dy, dx);
+}
+
+f32 normalize_angle(f32 a)
+{
+    a = fmodf(a, 2.0f * M_PI);
+    if (a < 0.0f)
+        a += 2.0f * M_PI;
+    return a;
+}
+
+bool point_in_radial_segment(f32 px, f32 py, radial_layout_t *layout, radial_segment_t *seg) 
+{
+    polar_t pt = {0};
+    cartesian_to_polar(px,py,layout->center_x, layout->center_y,
+                        layout->scale_x, layout->scale_y, &pt);
+
+    pt.angle = normalize_angle(pt.angle);
+    
+    f32 seg_start = normalize_angle(seg->angle_start);
+    f32 seg_end = normalize_angle(seg->angle_end);
+    
+    if (pt.radius < seg->inner_radius ||
+        pt.radius > seg->outer_radius) 
+    {
+        return false;
+    }
+    
+    bool in_angle = IN_RANGE_WRAP(pt.angle, seg_start, seg_end);
+    
+    return in_angle;
 }
 
 f32 radial_angle_step(i32 num_segments, f32 gap_factor) 
@@ -1613,15 +1656,66 @@ f32 radial_angle_step(i32 num_segments, f32 gap_factor)
 
 radial_segment_t radial_get_segment(radial_layout_t *layout, i32 i, f32 height) 
 {
-    f32 angle_step = radial_angle_step(layout->num_segments, layout->gap_factor);
+    f32 full_angle = 2.0f * M_PI;
+    f32 total_gap = full_angle * layout->gap_factor;
+    f32 gap_per_segment = total_gap / layout->num_segments;
+    
+    f32 segment_angle = (full_angle - total_gap) / layout->num_segments;
     
     radial_segment_t seg;
-    seg.angle_start = (i * angle_step) + layout->rotation;
-    seg.angle_end = ((i + 1) * angle_step) + layout->rotation;
+    // Each segment: [segment][gap][segment][gap]...
+    seg.angle_start = (i * (segment_angle + gap_per_segment)) + layout->rotation;
+    seg.angle_end = seg.angle_start + segment_angle;
     seg.inner_radius = layout->inner_radius;
     seg.outer_radius = layout->inner_radius + height * (layout->outer_radius - layout->inner_radius);
     
     return seg;
+}
+
+void draw_radial_segment_filled(image_view_t *img,
+                                radial_layout_t *layout, 
+                                 radial_segment_t *seg,
+                                 color4_t color) 
+{
+    #define ARC_STEPS 32
+    #define MAX_VERTICES (ARC_STEPS * 2)
+    
+    i32 vx[MAX_VERTICES];
+    i32 vy[MAX_VERTICES];
+    
+    f32 angle_range = seg->angle_end - seg->angle_start;
+    f32 angle_step = angle_range / (ARC_STEPS - 1);
+    
+    i32 vertex_count = 0;
+    
+    for (i32 i = 0; i < ARC_STEPS; i++) 
+    {
+        f32 angle = seg->angle_start + i * angle_step;
+        f32 x, y;
+        polar_to_cartesian((polar_t){seg->outer_radius, angle}, 
+                          layout->center_x, layout->center_y,
+                          layout->scale_x, layout->scale_y, &x, &y);
+        vx[vertex_count] = (i32)x;
+        vy[vertex_count] = (i32)y;
+        vertex_count++;
+    }
+    
+    for (i32 i = ARC_STEPS - 1; i >= 0; i--) 
+    {
+        f32 angle = seg->angle_start + i * angle_step;
+        f32 x, y;
+        polar_to_cartesian((polar_t){seg->inner_radius, angle},
+                          layout->center_x, layout->center_y,
+                          layout->scale_x, layout->scale_y, &x, &y);
+        vx[vertex_count] = (i32)x;
+        vy[vertex_count] = (i32)y;
+        vertex_count++;
+    }
+    
+    draw_filled_polygon(img, vx, vy, vertex_count, color);
+    
+    #undef ARC_STEPS
+    #undef MAX_VERTICES
 }
 
 void catmull_rom_point(f32 t, vertex_t p[4], vertex_t *out)

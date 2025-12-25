@@ -166,7 +166,7 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
     // any of them has memory if not we allocate a new block
     arena_t *current_block = arena->next;
     arena_t *best_fit_block = NULL;
-    size_t best_fit_free_space = LONG_MAX;
+    long best_fit_free_space = LONG_MAX;
 
     /* 
         Iterate all blocks in the list to find the one with 
@@ -174,7 +174,7 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
      */
     while(current_block)
     {
-        size_t current_free_space = ARENA_FREE_SPACE(current_block);
+        long current_free_space = ARENA_FREE_SPACE(current_block);
 
         if(current_free_space >= nbytes)
         {
@@ -243,7 +243,7 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
         // No suitable free blocks available so we have to call malloc to allocate a new one
         // If a new block must be allocated, one is requested that is large enough
         // to hold an arena structure plus nbytes, and have 10K bytes of available space left over.
-        size_t new_block_size = sizeof(union arena_header) + nbytes + 10*1024;
+        long new_block_size = sizeof(union arena_header) + nbytes + 10*1024;
         new_block = malloc(new_block_size);
         assert(new_block);
         cap = (byte *)new_block + new_block_size;
