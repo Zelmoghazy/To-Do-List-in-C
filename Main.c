@@ -88,8 +88,12 @@ typedef struct ui_block_t
     // so its easier to calculate later
     layout_t layout;
 
+    // position relative to parent
     i32 x, y;                    
     i32 w, h;
+
+    // the absolute screen position
+    i32 abs_x, abs_y;
 
     // Blocks can be scrolled, so they can contain
     // stuff beyond its dimensions we have to keep track
@@ -333,6 +337,7 @@ void ui_render_modal(ui_context_t *ctx);
 ui_block_t *ui_block_find_by_id(ui_context_t *ctx, u32 block_id);
 bool is_in_drag_handle(ui_block_t *block, i32 mouse_x, i32 mouse_y, rect_t *drag_rect);
 hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_rect_out);
+void ui_calculate_absolute_positions(ui_context_t *ctx);
 
 void set_dark_mode(GLFWwindow *window)
 {
@@ -381,7 +386,7 @@ void render_prof_entries(void)
 
     for(int i = 0; i < prof_buf_count; i++)
     {
-        width = MAX(width, get_string_width(gc.font, prof_buf[i]));
+        width = MAX(width, (int)get_string_width(gc.font, prof_buf[i]));
     }
 
     draw_rect_solid_wh(&gc.draw_buffer, 0, 0, width+10, height+10, HEX_TO_COLOR4(0x282a36));
@@ -586,6 +591,14 @@ void poll_events(void)
     // glfwWaitEventsTimeout(0.016);
 }
 
+ui_context_t* ui_new_ctx(void)
+{
+    ui_context_t *ctx = (ui_context_t*)calloc(1, sizeof(ui_context_t));
+    gc.block_map = NULL;
+
+    return ctx;
+}
+
 void ui_new_frame(ui_context_t *ctx)
 {
     ctx->blocks = ARENA_ALLOC_ZEROED(gc.frame_arena, MAX_BLOCKS, sizeof(ui_block_t*));
@@ -723,61 +736,14 @@ void ui_set_block_content_size(ui_block_t *block, i32 content_width, i32 content
  */
 void ui_block_to_screen_coords(ui_block_t *block, i32 block_x, i32 block_y, i32 *screen_x, i32 *screen_y)
 {
-    if(!block)
-    {
-        return;
-    }
-    
-    // offset the scroll 
-    // *screen_x = block_x - block->scroll_x;
-    // *screen_y = block_y - block->scroll_y;
-    *screen_x = block_x;
-    *screen_y = block_y;
-    
-    // Walk up the parent chain
-    ui_block_t *current = NULL;
-    LIST_FOR_EACH_UP(current, block->parent)
-    {
-        *screen_x += current->x - current->scroll_x;
-        *screen_y += current->y - current->scroll_y;
-    }
+   *screen_x = block->abs_x + block_x;
+   *screen_y = block->abs_y + block_y;
 }
 
 void ui_screen_to_block_coords(ui_block_t *block, i32 screen_x, i32 screen_y, i32 *block_x, i32 *block_y)
 {
-    *block_x = screen_x;
-    *block_y = screen_y;
-    
-    // Walk up the parent chain to subtract parent offsets
-    ui_block_t *current = NULL;
-    LIST_FOR_EACH_UP(current, block->parent)
-    {
-        *block_x -= current->x - current->scroll_x;
-        *block_y -= current->y - current->scroll_y;
-    }
-    
-    // Add scroll offset
-    *block_x += block->scroll_x;
-    *block_y += block->scroll_y;
-}
-
-/*
-    Get the block absolute screen position 
-        - take into account its parent scroll (its own scroll irrelevant)
-        - take into account if it is dragged or not
- */
-void ui_block_abs_pos(ui_block_t *block, i32 *abs_x, i32 *abs_y)
-{
-    *abs_x = block->x;
-    *abs_y = block->y;
-
-    ui_block_t *current = NULL;
-
-    LIST_FOR_EACH_UP(current, block->parent)
-    {
-        *abs_x += current->x - current->scroll_x;
-        *abs_y += current->y - current->scroll_y;
-    }
+    *block_x = screen_x - block->abs_x;
+    *block_y = screen_y - block->abs_y;
 }
 
 bool ui_point_in_block(ui_block_t *block, i32 screen_x, i32 screen_y)
@@ -787,14 +753,9 @@ bool ui_point_in_block(ui_block_t *block, i32 screen_x, i32 screen_y)
         return false;
     }
     
-    i32 abs_x = 0;
-    i32 abs_y = 0;
-
-    ui_block_abs_pos(block, &abs_x, &abs_y);
-
     rect_t block_screen_rect = {
-        .x = abs_x,
-        .y = abs_y,
+        .x = block->abs_x,
+        .y = block->abs_y,
         .w = (i32)block->w,
         .h = (i32)block->h
     };
@@ -814,6 +775,21 @@ ui_block_t* ui_block_at_point(ui_context_t *ctx, i32 screen_x, i32 screen_y)
     return NULL;
 }
 
+ui_block_t *ui_block_find_by_id(ui_context_t *ctx, u32 block_id)
+{
+    for(i32 i = ctx->block_count-1 ; i >= 0; i--)
+    {
+        if(ctx->blocks[i]->id == block_id)
+        {
+            return ctx->blocks[i];
+        }
+    }
+    return NULL;
+}
+
+/*
+    Functions to draw relative to the block
+ */
 void ui_set_pixel_in_block(ui_block_t *block, i32 block_x, i32 block_y, color4_t color)
 {
     i32 screen_x, screen_y;
@@ -824,21 +800,26 @@ void ui_set_pixel_in_block(ui_block_t *block, i32 block_x, i32 block_y, color4_t
 void ui_draw_rect_in_block(ui_block_t *block, i32 block_x, i32 block_y, u32 width, u32 height, color4_t color)
 {
     i32 screen_x, screen_y;
-    ui_block_to_screen_coords(block, block_x, block_y, &screen_x, &screen_y);
-    draw_rect_scissored(&gc.draw_buffer, screen_x, screen_y, width, height, color);
+    ui_block_to_screen_coords(block, block_x, block_y,
+                                     &screen_x, &screen_y);
+    draw_rect_scissored(&gc.draw_buffer, screen_x, screen_y,
+                         width, height, color);
 }
 
 void ui_draw_rounded_rect_in_block(ui_block_t *block, i32 block_x, i32 block_y, u32 width, u32 height, color4_t color)
 {
     i32 screen_x, screen_y;
-    ui_block_to_screen_coords(block, block_x, block_y, &screen_x, &screen_y);
-    draw_rounded_rect_scissored(&gc.draw_buffer, screen_x, screen_y, width, height, 25, color);
+    ui_block_to_screen_coords(block, block_x, block_y,
+                                     &screen_x, &screen_y);
+    draw_rounded_rect_scissored(&gc.draw_buffer, screen_x, screen_y,
+                                 width, height, 25, color);
 }
 
 void ui_render_text_in_block(ui_block_t *block)
 {
     i32 screen_x, screen_y;
-    ui_block_to_screen_coords(block, block->text.pos.x, block->text.pos.y, &screen_x, &screen_y);
+    ui_block_to_screen_coords(block, block->text.pos.x, block->text.pos.y,
+                             &screen_x, &screen_y);
     
     block->text.pos.x = screen_x;
     block->text.pos.y = screen_y;
@@ -852,20 +833,10 @@ void ui_draw_block_background(ui_block_t *block)
     {
         return;
     }
-    
-    i32 block_screen_x = 0;
-    i32 block_screen_y = 0;
-
-    ui_block_abs_pos(block, &block_screen_x, &block_screen_y);
-    
-    block->scissor_region.x = block_screen_x;
-    block->scissor_region.y = block_screen_y;
-    block->scissor_region.w = block->w;  
-    block->scissor_region.h = block->h;  
 
     draw_rect_scissored(&gc.draw_buffer, 
-                        block_screen_x, 
-                        block_screen_y, 
+                        block->abs_x, 
+                        block->abs_y, 
                         block->w, 
                         block->h, 
                         block->bg_color);
@@ -886,29 +857,29 @@ void ui_draw_block_background(ui_block_t *block)
     if (block->border_width > 0) 
     {
         draw_rect_scissored(&gc.draw_buffer,
-                            block_screen_x,
-                            block_screen_y,
+                            block->abs_x,
+                            block->abs_y,
                             block->w,
                             block->border_width,
                             block->border_color);
         
         draw_rect_scissored(&gc.draw_buffer,
-                            block_screen_x,
-                            block_screen_y + block->h - block->border_width,
+                            block->abs_x,
+                            block->abs_y + block->h - block->border_width,
                             block->w,
                             block->border_width,
                             block->border_color);
         
         draw_rect_scissored(&gc.draw_buffer,
-                            block_screen_x,
-                            block_screen_y,
+                            block->abs_x,
+                            block->abs_y,
                             block->border_width,
                             block->h,
                             block->border_color);
         
         draw_rect_scissored(&gc.draw_buffer,
-                            block_screen_x + block->w - block->border_width,
-                            block_screen_y,
+                            block->abs_x + block->w - block->border_width,
+                            block->abs_y,
                             block->border_width,
                             block->h,
                             block->border_color);
@@ -926,6 +897,8 @@ void ui_scroll_block(ui_block_t *block, i32 delta_x, i32 delta_y)
     
     block->scroll_x = Clamp(0, block->scroll_x, block->max_scroll_x);
     block->scroll_y = Clamp(0, block->scroll_y, block->max_scroll_y);
+
+    ui_calculate_absolute_positions(gc.ui_ctx);
 
     // save scroll values
     ui_block_map_t *state = shgetp_null(gc.block_map, block->title);
@@ -980,22 +953,23 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
     }
 }
 
-
 hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_rect_out) 
 {
     if (!block->visible) return HIT_REGION_NONE;
     
-    i32 ax, ay;
-    ui_block_abs_pos(block, &ax, &ay);
-
     i32 drag_handle_height = block->border_width + block->padding_top;
     i32 resize_width = 10;
 
-    rect_t drag_handle = {.x = ax,.y = ay,.w = block->w,.h = drag_handle_height};
-    rect_t left_edge = {.x = ax, .y = ay, .w = resize_width, .h = block->h};
-    rect_t right_edge = {.x = ax + block->w - resize_width, .y = ay, .w = resize_width, .h = block->h};
-    rect_t top_edge = {.x = ax, .y = ay, .w = block->w, .h = resize_width};
-    rect_t bottom_edge = {.x = ax, .y = ay + block->h - resize_width, .w = block->w, .h = resize_width};
+    rect_t drag_handle = {.x = block->abs_x, .y = block->abs_y,
+                          .w = block->w, .h = drag_handle_height};
+    rect_t left_edge = {.x = block->abs_x, .y = block->abs_y,
+                        .w = resize_width, .h = block->h};
+    rect_t right_edge = {.x = block->abs_x + block->w - resize_width, .y = block->abs_y,
+                         .w = resize_width, .h = block->h};
+    rect_t top_edge = {.x = block->abs_x, .y = block->abs_y,
+                       .w = block->w, .h = resize_width};
+    rect_t bottom_edge = {.x = block->abs_x, .y = block->abs_y + block->h - resize_width,
+                          .w = block->w, .h = resize_width};
     
     if (inside_rect(mx, my, &left_edge)) 
     {
@@ -1055,9 +1029,6 @@ void ui_handle_mouse_button(ui_context_t *ctx)
                 target->clicked = true;
                 printf("Block : %s clicked\n", target->title);
 
-                i32 abs_x, abs_y;
-                ui_block_abs_pos(target, &abs_x, &abs_y);
-
                 rect_t drag_rect;
                 hit_region_t region = is_in_hit_region(target, gc.mouse_x, gc.mouse_y, &drag_rect);
 
@@ -1070,7 +1041,7 @@ void ui_handle_mouse_button(ui_context_t *ctx)
                         {
                             target->resizing = true;
                             target->resize_left = true;
-                            target->drag_start_x = abs_x - gc.mouse_x;
+                            target->drag_start_x = target->abs_x - gc.mouse_x;
                         }
                         break;
                     case HIT_REGION_RIGHT_EDGE:
@@ -1078,7 +1049,7 @@ void ui_handle_mouse_button(ui_context_t *ctx)
                         {
                             target->resizing = true;
                             target->resize_right = true;
-                            target->drag_start_x = (abs_x + target->w) - gc.mouse_x;
+                            target->drag_start_x = (target->abs_x + target->w) - gc.mouse_x;
                         }
                         break;
                     case HIT_REGION_TOP_EDGE:
@@ -1086,7 +1057,7 @@ void ui_handle_mouse_button(ui_context_t *ctx)
                         {
                             target->resizing = true;
                             target->resize_top = true;
-                            target->drag_start_y = abs_y - gc.mouse_y;
+                            target->drag_start_y = target->abs_y - gc.mouse_y;
                         }
                         break;
                     case HIT_REGION_BOTTOM_EDGE:
@@ -1094,15 +1065,15 @@ void ui_handle_mouse_button(ui_context_t *ctx)
                         {
                             target->resizing = true;
                             target->resize_bottom = true;
-                            target->drag_start_y = (abs_y + target->h) - gc.mouse_y;
+                            target->drag_start_y = (target->abs_y + target->h) - gc.mouse_y;
                         }
                         break;
                     case HIT_REGION_DRAG_HANDLE:
                         if(target->draggable && !target->dragging)
                         {
                             target->dragging = true;
-                            target->drag_start_x = abs_x - gc.mouse_x;
-                            target->drag_start_y = abs_y - gc.mouse_y;
+                            target->drag_start_x = target->abs_x - gc.mouse_x;
+                            target->drag_start_y = target->abs_y - gc.mouse_y;
                         }
                         break;
                 }
@@ -1169,6 +1140,32 @@ void ui_handle_scroll(ui_context_t *ctx, f32 scroll_x, f32 scroll_y)
     }
 }
 
+void ui_calculate_absolute_positions(ui_context_t *ctx)
+{
+    for (i32 i = 0; i < ctx->block_count; i++)
+    {
+        ui_block_t *block = ctx->blocks[i];
+        if (!block) continue;
+        
+        if (block->parent == NULL)
+        {
+            // Root block
+            block->abs_x = block->x;
+            block->abs_y = block->y;
+        }
+        else
+        {
+            block->abs_x = block->parent->abs_x + block->x - block->parent->scroll_x;
+            block->abs_y = block->parent->abs_y + block->y - block->parent->scroll_y;
+        }
+        
+        block->scissor_region.x = block->abs_x;
+        block->scissor_region.y = block->abs_y;
+        block->scissor_region.w = block->w;
+        block->scissor_region.h = block->h;
+    }
+}
+
 void ui_layout_constraints(ui_block_t *block)
 {
     if (block) 
@@ -1232,20 +1229,16 @@ bool is_block_visible(ui_block_t *child, ui_block_t *parent)
     if(!parent || !child)
         return true;
 
-    i32 abs_x, abs_y;
-    ui_block_abs_pos(child, &abs_x, &abs_y);
-
     rect_t child_rect = {
-        .x = abs_x,
-        .y = abs_y,
+        .x = child->abs_x,
+        .y = child->abs_y,
         .w = child->w,
         .h = child->h
     };
 
-    ui_block_abs_pos(parent, &abs_x, &abs_y);
     rect_t parent_scissor = {
-        .x = abs_x,
-        .y = abs_y,
+        .x = parent->abs_x,
+        .y = parent->abs_y,
         .w = parent->w,
         .h = parent->h
     };
@@ -1308,7 +1301,7 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
                 child = NULL;
                 LIST_FOR_EACH_DOWN(child,block->first)
                 {
-                    child->x = base_x + child->x;
+                    child->x = child->x + base_x;
                     child->y = current_y;
                     
                     // Only leaf block can have a text item
@@ -1317,12 +1310,11 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
                         f32 text_width = get_string_width(child->text.font, child->text.string);
                         f32 text_height = get_line_height(child->text.font);
                         
-                        i32 center_x = (base_x + (child->w - text_width)/2);
-                        i32 center_y = current_y + (default_item_height-text_height)/2;
+                        i32 center_x = ((child->w - text_width)/2);
+                        i32 center_y = (default_item_height-text_height)/2;
 
-                        child->text.pos.x =
-                            center_x < 0 ? child->x + 10 : center_x;
-                        child->text.pos.y = center_y < 0 ? current_y + 10 : center_y;
+                        child->text.pos.x = center_x < 0 ? 10 : center_x;
+                        child->text.pos.y = center_y < 0 ? 10 : center_y;
                     }
 
                     current_y += child->h + item_spacing;
@@ -1365,8 +1357,8 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
                         f32 text_width = get_string_width(child->text.font, child->text.string);
                         f32 text_height = get_line_height(child->text.font);
 
-                        child->text.pos.x = current_x + (child->w - text_width)/2;
-                        child->text.pos.y = base_y + (default_item_height-text_height)/2;
+                        child->text.pos.x = (child->w - text_width)/2;
+                        child->text.pos.y = (default_item_height-text_height)/2;
                     }
 
                     current_x += child->w + item_spacing;
@@ -1391,7 +1383,7 @@ void draw_scroll_bar(ui_block_t *block)
     i32 gap = block->border_width * 4;
     i32 scroll_thumb_width = block->border_width * 2;
     
-    i32 scroll_bar_x = block->x + block->w - gap + block->border_width;
+    i32 scroll_bar_x = block->w - gap + block->border_width;
     
     i32 content_height = block->max_scroll_y + block->h;
 
@@ -1404,14 +1396,15 @@ void draw_scroll_bar(ui_block_t *block)
     i32 scroll_thumb_height = (i32)(block->h * visible_ratio);
     scroll_thumb_height = MAX(scroll_thumb_height, scroll_thumb_width * 2);
 
-    i32 scroll_bar_min_y = block->y;
+    i32 scroll_bar_min_y = 0;
     i32 scroll_bar_max_y = scroll_bar_min_y + block->h - scroll_thumb_height;
     
     f32 scroll_bar_ratio = fabsf((f32)(block->scroll_y)/(f32)(block->max_scroll_y));
 
     i32 scroll_bar_y = LERP_F32(scroll_bar_min_y, scroll_bar_max_y, scroll_bar_ratio);
     
-    ui_draw_rect_in_block(block, scroll_bar_x, scroll_bar_y, scroll_thumb_width, scroll_thumb_height, HEX_TO_COLOR4(0x525356));
+    ui_draw_rect_in_block(block, scroll_bar_x, scroll_bar_y, 
+                          scroll_thumb_width, scroll_thumb_height, HEX_TO_COLOR4(0x525356));
 }
 
 void ui_begin_panel(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width, u32 height, layout_t layout)
@@ -1436,6 +1429,9 @@ void ui_update_floating_panel(ui_block_t *block)
 {
     static bool first_update = true;
     static rect_t new_pos ={0};
+    static i32 snap_x = 0;
+    static i32 snap_y = 0;
+    static bool snap = false;
 
     if(first_update){
         new_pos.x = block->x;
@@ -1451,7 +1447,53 @@ void ui_update_floating_panel(ui_block_t *block)
         {   
             new_pos.x = (f32)gc.mouse_x + block->drag_start_x;
             new_pos.y = (f32)gc.mouse_y + block->drag_start_y;
+
+            snap = false;
+
+            color4_t color = HEX_TO_COLOR4(0x1a2226);
+            color.a = 100;
+
+            if((new_pos.x > ((i32)gc.screen_width - block->w)) 
+                && new_pos.y < block->h)
+            {
+                snap = true;
+                snap_x = (gc.screen_width - block->w);
+                snap_y = 0;
+                draw_rect_solid_wh(&gc.draw_buffer, snap_x, snap_y,
+                                   block->w,block->h, color);
+            }
+            else if(new_pos.x < block->w 
+                    && new_pos.y < block->h)
+            {
+                snap = true;
+                snap_x = 0;
+                snap_y = 0;
+                draw_rect_solid_wh(&gc.draw_buffer, snap_x, snap_y,
+                                    block->w, block->h, color);
+            }
+            else if((new_pos.x > ((i32)gc.screen_width - block->w)) 
+                && (new_pos.y > ((i32)gc.screen_height - block->h)))
+            {
+                snap = true;
+                snap_x = (gc.screen_width - block->w);
+                snap_y = (gc.screen_height - block->h);
+                draw_rect_solid_wh(&gc.draw_buffer, snap_x, snap_y,
+                                   block->w, block->h, color);
+            }
+            else if(new_pos.x < block->w 
+                    && (new_pos.y > ((i32)gc.screen_height - block->h)))
+            {
+                color4_t color = HEX_TO_COLOR4(0x1a2226);
+                color.a = 100;
+
+                snap = true;
+                snap_x = 0;
+                snap_y = (gc.screen_height - block->h);
+                draw_rect_solid_wh(&gc.draw_buffer, snap_x, snap_y,
+                                    block->w, block->h, color);
+            }
         }
+
         if (block->resizing)
         {
             if (block->resize_left) {
@@ -1475,16 +1517,26 @@ void ui_update_floating_panel(ui_block_t *block)
             if (new_pos.h < 100) new_pos.h = 100;
         }
     }
+    else
+    {
+        if(snap)
+        {
+            new_pos.x=snap_x;
+            new_pos.y=snap_y;
+        }
+    }
 
     block->x=new_pos.x;
     block->y=new_pos.y;
     block->w=new_pos.w;
     block->h=new_pos.h;
+
+    ui_calculate_absolute_positions(gc.ui_ctx);
 }
 
-void ui_begin_panel_floating(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width, u32 height)
+void ui_begin_panel_floating(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width, u32 height, layout_t layout)
 {
-    ui_block_t *panel = CHECK_PTR(ui_new_block(ctx, title, x, y, width, height, NO_LAYOUT));
+    ui_block_t *panel = CHECK_PTR(ui_new_block(ctx, title, x, y, width, height, layout));
 
     if(!panel){
         return;
@@ -1497,10 +1549,10 @@ void ui_begin_panel_floating(ui_context_t *ctx, char *title, i32 x, i32 y, u32 w
 
     panel->custom_update = ui_update_floating_panel;
 
-    if(ctx->current_block)
-    {
-        ui_add_child(ctx, panel);
-    }
+    // if(ctx->current_block)
+    // {
+    //     ui_add_child(ctx, panel);
+    // }
     ctx->current_block = panel;
 }
 
@@ -1523,6 +1575,8 @@ void ui_layout(ui_context_t *ctx)
         ui_block_t *block = ctx->layout_order[i];
         ui_block_layout(ctx, block); 
     }
+
+    ui_calculate_absolute_positions(ctx);
 
     /* Mark non-visible blocks */
     for (i32 i = ctx->layout_count - 1; i >= 0; i--)
@@ -1681,7 +1735,8 @@ void ui_render_block(ui_block_t *block)
         else
         {
             color4_t color = block->hover?block->hover_color:block->bg_color;
-            ui_draw_rect_in_block(block, block->x, block->y, block->w, block->h, color);
+            ui_draw_rect_in_block(block, 0, 0, 
+                                  block->w, block->h, color);
             if (block->text.string) {
                 ui_render_text_in_block(block);
             }
@@ -1720,14 +1775,16 @@ void ui_render_checkbox(ui_block_t *block)
 {
     color4_t color = block->hover?block->hover_color:block->bg_color;
 
-    ui_draw_rect_in_block(block, block->x, block->y, block->w, block->h, color);
+    ui_draw_rect_in_block(block, 0, 0, 
+                          block->w, block->h, color);
 
     i32 box_size = 20;
-    i32 box_x = block->x + 10;
-    i32 box_y = block->y + ((block->h - box_size)/2);
+    i32 box_x = 10;
+    i32 box_y = ((block->h - box_size)/2);
 
     color4_t box_color = {200, 200, 200, 255};
-    ui_draw_rect_in_block(block, box_x, box_y, box_size, box_size, box_color);
+    ui_draw_rect_in_block(block, box_x, box_y, 
+                          box_size, box_size, box_color);
 
     if (block->toggled) 
     {
@@ -1744,17 +1801,20 @@ void ui_render_checkbox(ui_block_t *block)
     if (block->text.string) 
     {
         block->text.pos.x = box_x + box_size + 10;
-        block->text.pos.y = block->y + (block->h - get_line_height(block->text.font)) / 2;
+        block->text.pos.y = (block->h - get_line_height(block->text.font)) / 2;
         ui_render_text_in_block(block);
 
+        /*         
         rendered_text_tt icon = {
             .font = gc.icon_font,
-            .pos = {.x = block->text.pos.x+get_string_width(gc.font, block->text.string)+10, .y = block->text.pos.y},
+            .pos = {.x = block->text.pos.x + get_string_width(gc.font, block->text.string)+10,
+                    .y = block->text.pos.y},
             .color = {.r = 255, .g = 184, .b = 108, .a = 255},
             .string = EDIT_ICON
         };
 
-        render_string_unicode(&gc.draw_buffer, &icon);
+        render_string_unicode(&gc.draw_buffer, &icon); 
+        */
     }
 }
 
@@ -1783,7 +1843,23 @@ void ui_render_button(ui_block_t *block)
     // color4_t color = block->hover?block->hover_color:block->bg_color;
     color4_t color = color4_lerp(block->bg_color,HEX_TO_COLOR4(0x47c179), block->hot_anim_t);
 
-    ui_draw_rounded_rect_in_block(block, block->x, block->y, block->w, block->h, color);
+    float scale = 1.0f + (block->hot_anim_t * 0.05f); 
+    float scaled_w = block->w * scale;
+    float scaled_h = block->h * scale;
+    float offset_x = (scaled_w - block->w) * 0.5f;
+    float offset_y = (scaled_h - block->h) * 0.5f;
+    if (block->hot_anim_t > 0.01f) {
+        color4_t glow = HEX_TO_COLOR4(0x95d9ae);
+        float border_thickness = 2.0f * block->hot_anim_t;
+        ui_draw_rounded_rect_in_block(block,
+            - offset_x - border_thickness,
+            - offset_y - border_thickness,
+            scaled_w + border_thickness * 2,
+            scaled_h + border_thickness * 2,
+            glow);
+    }
+    ui_draw_rounded_rect_in_block(block, 0, 0,
+                                  block->w, block->h, color);
     ui_render_text_in_block(block);
 }
 
@@ -1822,13 +1898,13 @@ void ui_render_radio(ui_block_t *block)
 {
     color4_t color = block->hover?block->hover_color:block->bg_color;
 
-    ui_draw_rect_in_block(block, block->x, block->y, block->w, block->h, color);
+    ui_draw_rect_in_block(block, 0, 0, block->w, block->h, color);
 
     bool selected = block->user_data;
 
     i32 box_size = 20;
-    i32 box_x = block->x + 10;
-    i32 box_y = block->y + ((block->h - box_size)/2);
+    i32 box_x = 10;
+    i32 box_y = ((block->h - box_size)/2);
 
 
     color4_t box_color = {200, 200, 200, 255};
@@ -1850,7 +1926,7 @@ void ui_render_radio(ui_block_t *block)
     if (block->text.string) 
     {
         block->text.pos.x = box_x + box_size + 10;
-        block->text.pos.y = block->y + (block->h - get_line_height(block->text.font)) / 2;
+        block->text.pos.y = (block->h - get_line_height(block->text.font)) / 2;
         ui_render_text_in_block(block);
         
         /*         
@@ -1893,26 +1969,32 @@ void ui_radio(ui_context_t *ctx, char *title, i32 *var, i32 val)
 
 void ui_render_slider(ui_block_t *block)
 {
-    ui_draw_rect_in_block(block, block->x, block->y, block->w, block->h, block->bg_color);
+    ui_draw_rect_in_block(block, 0, 0, 
+                          block->w, block->h, block->bg_color);
     
     i32 track_height = 4;
-    i32 track_y = block->y + (block->h - track_height) / 2;
+    i32 track_y = (block->h - track_height) / 2;
 
     f32 normalized = NORMALIZE(block->value, block->min_value, block->max_value);
-    i32 handle_x = block->x + (i32)(normalized * block->w);
-    i32 handle_y = block->y + block->h / 2;
     i32 handle_size = 16;
+    i32 handle_x = (i32)(normalized * block->w);
+    i32 handle_y = block->h / 2;
 
-    ui_draw_rect_in_block(block, block->x, track_y, handle_x-handle_size, track_height, HEX_TO_COLOR4(0x6200ee));
-    ui_draw_rect_in_block(block, block->x+handle_x-handle_size, track_y, block->w-handle_x, track_height, HEX_TO_COLOR4(0xcab6e6));
+    i32 handle_start_x = handle_x - handle_size/2.0f;
+    i32 handle_start_y = handle_y - handle_size/2.0f;
+
+    ui_draw_rect_in_block(block, 0, track_y, 
+                         handle_start_x, track_height, HEX_TO_COLOR4(0x6200ee));
+    ui_draw_rect_in_block(block, handle_start_x, track_y,
+                          block->w-handle_x, track_height, HEX_TO_COLOR4(0xcab6e6));
     
     color4_t handle_color = block->clicked ?  HEX_TO_COLOR4(0x6200ee) : dark(HEX_TO_COLOR4(0x6200ee));
-
-    i32 screen_x, screen_y;
-    ui_block_to_screen_coords(block, handle_x, handle_y, &screen_x, &screen_y);
     
     rect_t handle = {
-        screen_x-handle_size/2.0f,screen_y-handle_size/2.0f,handle_size, handle_size
+        block->abs_x + handle_start_x,
+        block->abs_y + handle_start_y,
+        handle_size, 
+        handle_size
     };
 
     if(inside_rect(gc.mouse_x, gc.mouse_y, &handle))
@@ -1920,8 +2002,9 @@ void ui_render_slider(ui_block_t *block)
         handle_color =  HEX_TO_COLOR4(0x3149c7);
     }
 
-    draw_circle_filled_aa(&gc.draw_buffer, screen_x, screen_y, handle_size/2.0, handle_color);
-    // draw_rounded_rect_scissored(&gc.draw_buffer, screen_x, screen_y, handle_size, handle_size*2, 25, handle_color);
+    draw_circle_filled_aa(&gc.draw_buffer, block->abs_x + handle_x, block->abs_y + handle_y,
+                         handle_size/2.0, handle_color);
+    // draw_rounded_rect_scissored(&gc.draw_buffer, handle_x, handle_y, handle_size, handle_size*2, 25, handle_color);
 
     
     if (block->text.string) {
@@ -1941,10 +2024,7 @@ void ui_update_slider(ui_block_t *block)
 
     if(block->clicked)
     {
-        i32 abs_x, abs_y;
-        ui_block_abs_pos(block, &abs_x, &abs_y);
-        
-        f32 normalized = ((f32)gc.mouse_x - abs_x) / (f32)block->w;
+        f32 normalized = ((f32)gc.mouse_x - block->abs_x) / (f32)block->w;
         normalized = Clamp(0.0f, normalized, 1.0f);
         
         block->value = LERP_F32(block->min_value, block->max_value, normalized);
@@ -1975,6 +2055,115 @@ f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
     return slider->value;
 }
 
+/* -------------- Tree Widget stuff -------------- */
+typedef struct{
+    bool collapsed;
+    int depth;
+}tree_node_state_t;
+
+typedef struct {char *key; tree_node_state_t value; } tree_widget_map_t;
+tree_widget_map_t *g_tree_widget_map = NULL;
+
+void ui_update_tree_node(ui_block_t *block) 
+{
+}
+
+void ui_render_tree_node(ui_block_t *block) 
+{
+    tree_widget_map_t *map_entry = shgetp_null(g_tree_widget_map, block->title);
+    if (!map_entry) return;
+    
+    tree_node_state_t *node = &map_entry->value;
+
+    bool release = block->released;
+
+    if(release){
+        block->released = false;
+        TOGGLE(node->collapsed);
+    }
+
+    color4_t color = block->hover?HEX_TO_COLOR4(0x287fc9):COLOR_TRANSPARENT;
+
+    ui_draw_rect_in_block(block, 0, 0, block->w, block->h, color);
+
+    i32 screen_x = block->abs_x + 10;
+    i32 screen_y = block->abs_y + (block->h - get_line_height(block->text.font)) / 2;
+
+    if (block->text.string) 
+    {
+        if(node->collapsed)
+        {
+            rendered_text_tt icon = {
+                .font = gc.icon_font,
+                .pos = {.x = screen_x, .y = screen_y},
+                .color = COLOR_WHITE,
+                .string = RIGHT_CIRCLE_ARROW
+            };
+            render_string_unicode(&gc.draw_buffer, &icon);
+        }
+        else
+        {
+            rendered_text_tt icon = {
+                .font = gc.icon_font,
+                .pos = {.x = screen_x, .y = screen_y},
+                .color = COLOR_WHITE,
+                .string = DOWN_CIRCLE_ARROW
+            };
+
+            render_string_unicode(&gc.draw_buffer, &icon);
+        }
+
+        block->text.pos.x = 50;
+        block->text.pos.y = (block->h - get_line_height(block->text.font)) / 2;
+
+        ui_render_text_in_block(block);
+    }
+}
+void ui_tree_node_end(ui_context_t *ctx);
+
+bool ui_tree_node_begin(ui_context_t *ctx, char *title)
+{
+    tree_widget_map_t *map_entry = shgetp_null(g_tree_widget_map, title);
+    if (!map_entry) 
+    {
+        tree_node_state_t state = {
+            .collapsed = true
+        };
+        shput(g_tree_widget_map, title, state);
+        map_entry = shgetp_null(g_tree_widget_map, title);
+    }
+
+    ui_block_t *node = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 0, VERTICAL_LAYOUT));
+
+    node->is_leaf = true;
+    node->clickable = true;
+    node->toggleable = true;
+    
+    node->bg_color = HEX_TO_COLOR4(0xbd93f9);
+    node->hover_color = lite(HEX_TO_COLOR4(0xbd93f9));
+
+    if(ctx->current_block)
+    {
+        ui_add_child(ctx, node);
+    }
+
+    node->custom_render = ui_render_tree_node;
+    node->custom_update = NULL;
+
+    char *node_panel = ARENA_ALLOC(gc.frame_arena, 128);
+    snprintf(node_panel, 128, "title-%s",title);
+    if(!map_entry->value.collapsed){
+        ui_begin_panel(gc.ui_ctx, node_panel, 0, 0, 0, 200, VERTICAL_LAYOUT);
+    }
+
+    return !map_entry->value.collapsed;
+}
+
+void ui_tree_node_end(ui_context_t *ctx)
+{
+    ui_end_panel(ctx);
+}
+
 /* -------------- Modal Widget stuff -------------- */
 
 void ui_begin_modal(ui_context_t *ctx, char *title, i32 width, i32 height)
@@ -1996,6 +2185,13 @@ void ui_begin_modal(ui_context_t *ctx, char *title, i32 width, i32 height)
     ctx->modal_active = true;
 
     ctx->current_block = modal;
+}
+
+void ui_end_modal(ui_context_t *ctx) {
+
+    if (gc.key_pressed[GLFW_KEY_0]) {
+        ctx->modal_active = false;
+    }
 }
 
 void ui_render_modal(ui_context_t *ctx)
@@ -2043,11 +2239,8 @@ void ui_update_radial_menu(ui_block_t *block)
     radial_menu_state_t *menu = &map_entry->value;
     if (!menu->active) return;
     
-    i32 abs_x, abs_y;
-    ui_block_abs_pos(block, &abs_x, &abs_y);
-    
-    menu->layout.center_x = abs_x + block->w / 2.0f;
-    menu->layout.center_y = abs_y + block->h / 2.0f;
+    menu->layout.center_x = block->abs_x + block->w / 2.0f;
+    menu->layout.center_y = block->abs_y + block->h / 2.0f;
     
     f32 mouse_x = (f32)gc.mouse_x;
     f32 mouse_y = (f32)gc.mouse_y;
@@ -2193,6 +2386,54 @@ radial_menu_map_t *ui_radial_menu(ui_context_t *ctx, char *title, f32 x, f32 y, 
     return map_entry;
 } 
 
+radial_menu_map_t *ui_radial_menu_modal(ui_context_t *ctx, char *title, f32 radius)
+{
+    ui_begin_modal(ctx,"modal1", gc.screen_width, gc.screen_height);
+        radial_menu_map_t *map_entry = shgetp_null(g_radial_menu_map, title);
+        if (!map_entry) 
+        {
+            radial_menu_state_t state = {
+                .layout = {
+                    .center_x = gc.screen_width / 2.0f,
+                    .center_y = gc.screen_height / 2.0f,
+                    .scale_x = 1.0f,
+                    .scale_y = 1.0f,
+                    .num_segments = 0,
+                    .inner_radius = radius * 0.3f,
+                    .outer_radius = radius,
+                    .rotation = -M_PI / 2.0f, 
+                    .gap_factor = 0.1f
+                },
+                .items = NULL,
+                .hovered_index = -1,
+                .selected_index = -1,
+                .active = true
+            };
+            shput(g_radial_menu_map, title, state);
+        }
+
+        ui_block_t *radial = CHECK_PTR(ui_new_block(ctx, title, gc.screen_width / 2.0f - radius, gc.screen_height / 2.0f - radius, radius * 2, radius * 2, NO_LAYOUT));
+
+        radial->is_leaf = true;
+        radial->clickable = true;
+        radial->toggleable = true;
+        radial->draggable = true;
+        
+        radial->bg_color = HEX_TO_COLOR4(0xbd93f9);
+        radial->hover_color = lite(HEX_TO_COLOR4(0xbd93f9));
+
+        radial->custom_render = ui_render_radial_menu;
+        radial->custom_update = ui_update_radial_menu;
+
+        ui_add_child(ctx, radial);
+    ui_end_modal(ctx);
+    if (map_entry->value.selected_index >= 0 || gc.right_button_down) {
+        ctx->modal_active = false;
+        map_entry->value.active = false;
+    }
+    return map_entry;
+}
+
 /* -------------- Text Edit Widget Stuff -------------- */
 
 void buffer_ripple_remove(text_edit_state_t *state, size_t position, size_t count) 
@@ -2222,12 +2463,8 @@ void buffer_make_room(text_edit_state_t* state, size_t position, size_t count)
 
 i32 text_edit_get_char_at_x(ui_block_t *block, text_edit_state_t *state, i32 mouse_x)
 {
-    i32 abs_x, abs_y = 0;
-
-    ui_block_abs_pos(block, &abs_x, &abs_y);
-
     // we are now in the block space
-    i32 local_x = mouse_x - abs_x;
+    i32 local_x = mouse_x - block->abs_x;
     // acount for scroll
     local_x += state->scroll_offset;
 
@@ -2608,20 +2845,21 @@ void ui_render_text_edit(ui_block_t *block)
     
     color4_t bg_color = state->focused ? (color4_t){60, 60, 80, 255} : (color4_t){40, 42, 54, 255};
     
-    ui_draw_rect_in_block(block, block->x, block->y, block->w, block->h, bg_color);
+    ui_draw_rect_in_block(block, 0, 0, block->w, block->h, bg_color);
     
     color4_t border_color = state->focused ? (color4_t){100, 150, 255, 255} : (color4_t){100, 100, 100, 255};
     
     i32 border = 2;
-    ui_draw_rect_in_block(block, block->x, block->y, block->w, border, border_color);
-    ui_draw_rect_in_block(block, block->x, block->y + block->h - border, block->w, border, border_color);
-    ui_draw_rect_in_block(block, block->x, block->y, border, block->h, border_color);
-    ui_draw_rect_in_block(block, block->x + block->w - border, block->y, border, block->h, border_color);
+    ui_draw_rect_in_block(block, 0, 0,
+                          block->w, border, border_color);
+    ui_draw_rect_in_block(block, 0, block->h - border,
+                          block->w, border, border_color);
+    ui_draw_rect_in_block(block, 0, 0, border,
+                          block->h, border_color);
+    ui_draw_rect_in_block(block, block->w - border, 0,
+                         border, block->h, border_color);
     
-    i32 abs_x, abs_y;
-    ui_block_abs_pos(block, &abs_x, &abs_y);
-    
-    push_scissor(abs_x + border, abs_y + border, 
+    push_scissor(block->abs_x + border, block->abs_y + border, 
                  block->w - border * 2, block->h - border * 2);
     
         if (state->selection_start >= 0) 
@@ -2639,12 +2877,13 @@ void ui_render_text_edit(ui_block_t *block)
                 sel_width += get_char_width(block->text.font, state->buffer[i]);
             }
             
-            i32 sel_x = block->x + (i32)sel_start_x - state->scroll_offset;
-            i32 sel_y = block->y + 5;
+            i32 sel_x = (i32)sel_start_x - state->scroll_offset;
+            i32 sel_y = 5;
             i32 sel_h = block->h - 10;
             
             color4_t selection_color = {100, 150, 200, 128};
-            ui_draw_rect_in_block(block, sel_x, sel_y, (i32)sel_width, sel_h, selection_color);
+            ui_draw_rect_in_block(block, sel_x, sel_y, 
+                                  (i32)sel_width, sel_h, selection_color);
         }
         
         if (state->buffer_len > 0) 
@@ -2652,10 +2891,10 @@ void ui_render_text_edit(ui_block_t *block)
             rendered_text_tt text = {
                 .font = block->text.font,
                 .pos = {
-                    .x = block->x + 5 - state->scroll_offset,
-                    .y = block->y + (block->h - get_line_height(block->text.font)) / 2
+                    .x = 5 - state->scroll_offset,
+                    .y = (block->h - get_line_height(block->text.font)) / 2
                 },
-                .color = {255, 255, 255, 255},
+                .color = COLOR_WHITE,
                 .string = state->buffer
             };
             block->text = text;
@@ -2669,8 +2908,8 @@ void ui_render_text_edit(ui_block_t *block)
                 cursor_x += get_char_width(block->text.font, state->buffer[i]);
             }
             
-            i32 cx = block->x + (i32)cursor_x - state->scroll_offset;
-            i32 cy = block->y + 5;
+            i32 cx = (i32)cursor_x - state->scroll_offset;
+            i32 cy = 5;
             i32 ch = block->h - 10;
             
             color4_t cursor_color = {255, 255, 255, 255};
@@ -2709,7 +2948,7 @@ text_edit_state_t *ui_text_edit(ui_context_t *ctx, char *title, i32 x, i32 y, i3
     return &shgetp_null(gc.text_map, title)->value;
 }
 
-/* Multiline text label stuff */
+/* -------------- Multiline text label stuff -------------- */
 void ui_render_text_label (ui_block_t *block)
 {
     text_edit_map_t *map_entry = shgetp_null(gc.text_map, block->title);
@@ -2719,14 +2958,11 @@ void ui_render_text_label (ui_block_t *block)
     text_edit_state_t *state = &map_entry->value;
 
     if(block->bg_color.a > 0){
-        ui_draw_rounded_rect_in_block(block, block->x, block->y, block->w, block->h, block->bg_color);
+        ui_draw_rounded_rect_in_block(block, 0, 0, block->w, block->h, block->bg_color);
     }
 
-    i32 abs_x, abs_y;
-    ui_block_abs_pos(block, &abs_x, &abs_y);
-    
     i32 padding = 5;
-    push_scissor(abs_x + padding, abs_y + padding, 
+    push_scissor(block->abs_x + padding, block->abs_y + padding, 
                  block->w - padding * 2, block->h - padding * 2);
                  
         i32 line_height = get_line_height(block->text.font);
@@ -2756,10 +2992,10 @@ void ui_render_text_label (ui_block_t *block)
                         {
                             .font = block->text.font,
                             .pos = {
-                                .x = block->x + padding,
-                                .y = block->y + padding + current_line * line_height
+                                .x = padding,
+                                .y = padding + current_line * line_height
                             },
-                            .color = COLOR_WHITE,
+                            .color = HEX_TO_COLOR4(0x50fa7b),
                             .string = line_buffer
                         };
                         
@@ -2775,7 +3011,7 @@ void ui_render_text_label (ui_block_t *block)
     pop_scissor();
 }
 
-void ui_text_label(ui_context_t *ctx, char *title, const char *text, i32 x, i32 y, i32 max_width, color4_t bg_color)
+void ui_text_label(ui_context_t *ctx, char *title, const char *text, i32 x, i32 y, i32 max_width, color4_t bg_color, bool wrap)
 {
     text_edit_map_t *map_entry = shgetp_null(gc.text_map, title);
 
@@ -2794,18 +3030,20 @@ void ui_text_label(ui_context_t *ctx, char *title, const char *text, i32 x, i32 
     
     PROFILE("Wrapping text")
     {
-        wrap_text(gc.font, text, (float)(max_width - 10), 
-                  state->buffer, TEXT_BUFFER_MAX, 
-                  &line_count, &max_line_width);
+        if(wrap)
+        {
+            wrap_text(gc.font, text, (float)(max_width - 10), 
+                      state->buffer, TEXT_BUFFER_MAX, 
+                      &line_count, &max_line_width);
+        }
     }
     
     state->buffer_len = (i32)strlen(state->buffer);
-
     i32 line_height = get_line_height(gc.font);
-    
     i32 total_height = line_count * line_height + 10;
 
-    ui_block_t *block = CHECK_PTR(ui_new_block(ctx, title, x, y, max_width, total_height, NO_LAYOUT));
+    ui_block_t *block = CHECK_PTR(ui_new_block(ctx, title, x, y, 
+                                  max_width, total_height, NO_LAYOUT));
 
     block->bg_color = bg_color;
     block->is_leaf = true;
@@ -2816,14 +3054,8 @@ void ui_text_label(ui_context_t *ctx, char *title, const char *text, i32 x, i32 
 
 void ui_end_frame(ui_context_t *ctx)
 {
-}
-
-ui_context_t* ui_new_ctx(void)
-{
-    ui_context_t *ctx = (ui_context_t*)calloc(1, sizeof(ui_context_t));
-    gc.block_map = NULL;
-
-    return ctx;
+    // glfwGetCursorPos(gc.window, &gc.mouse_x, &gc.mouse_y);
+    ui_handle_mouse_move(ctx,0,0);
 }
 
 /* For when I feel like experimenting with multithreading */
@@ -2963,7 +3195,11 @@ void present_frame(image_view_t* view)
     {
         blit_to_screen(view->pixels, view->width, view->height);
     }
-    glfwSwapBuffers((GLFWwindow*)gc.window);
+
+    PROFILE("swapping buffers")
+    {
+        glfwSwapBuffers((GLFWwindow*)gc.window);
+    }
 }
 
 void render_frame_history_graph(void)
@@ -3038,18 +3274,6 @@ void render_mouse_stuff(void)
     // draw_rounded_rectangle_filled_aa(&gc.draw_buffer, gc.mouse_x - 100, gc.mouse_y - 50, gc.mouse_x + 100, gc.mouse_y + 50, 20.0f, COLOR_CYAN);
 }
 
-ui_block_t *ui_block_find_by_id(ui_context_t *ctx, u32 block_id)
-{
-    for(i32 i = ctx->block_count-1 ; i >= 0; i--)
-    {
-        if(ctx->blocks[i]->id == block_id)
-        {
-            return ctx->blocks[i];
-        }
-    }
-    return NULL;
-}
-
 void menu_callback_new(void *data) {
     printf("New selected!\n");
 }
@@ -3119,7 +3343,8 @@ void render_layout_test_screen(void)
 
     PROFILE("Building UI Tree")
     {
-        ui_begin_panel(gc.ui_ctx, "Root", gc.side_panel_x*gc.screen_width, 0, (1-gc.side_panel_x)*gc.screen_width, gc.screen_height, VERTICAL_LAYOUT);
+        ui_begin_panel(gc.ui_ctx, "Root", gc.side_panel_x*gc.screen_width,
+                       0, (1-gc.side_panel_x)*gc.screen_width, gc.screen_height, VERTICAL_LAYOUT);
             ui_begin_panel(gc.ui_ctx, "Test1", 0, 0, 0, 100, HORIZONTAL_LAYOUT);
                 ui_begin_panel(gc.ui_ctx, "Test1-1", 0, 0, 100, 0, VERTICAL_LAYOUT);
                 ui_end_panel(gc.ui_ctx);
@@ -3147,22 +3372,42 @@ void render_layout_test_screen(void)
             ui_end_panel(gc.ui_ctx);
             
             ui_begin_panel(gc.ui_ctx, "Test3", 0, 0, 0, 300, VERTICAL_LAYOUT);
+                if(ui_tree_node_begin(gc.ui_ctx, "First Node"))
+                {
+                    ui_button(gc.ui_ctx,"Node does it work");
+                    ui_button(gc.ui_ctx,"I truely want it to work");
+                    ui_tree_node_end(gc.ui_ctx);
+                } 
+                if(ui_tree_node_begin(gc.ui_ctx, "Second Node"))
+                {
+                    ui_button(gc.ui_ctx,"done1");
+                    ui_button(gc.ui_ctx,"done2");
+                    if(ui_tree_node_begin(gc.ui_ctx, "Nested Node"))
+                    {
+                        ui_button(gc.ui_ctx,"Nested1");
+
+                        ui_tree_node_end(gc.ui_ctx);
+                    }
+                    ui_tree_node_end(gc.ui_ctx);
+                } 
                 f32 val = ui_slider(gc.ui_ctx, 50.0f, 600.0f,"Slider");
                 text_state = ui_text_edit(gc.ui_ctx, "TextEdit1", 0,0,200,"Add your task ..");
                 ui_text_label(gc.ui_ctx, "MultiLine", 
-                "Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. ", 0, 0, val, HEX_TO_COLOR4(0x3d005c)); 
+                              "Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. ",
+                              0, 0, val, HEX_TO_COLOR4(0x3d005c),true);
+
             ui_end_panel(gc.ui_ctx);
 
             ui_begin_panel(gc.ui_ctx, "Test4", 0, 0, 0, 300, NO_LAYOUT);
                 radial_menu_map_t *menu_state = ui_radial_menu(gc.ui_ctx, "testradial", 150,150 , 150);
-                static int once = 0;
-                if (menu_state && !once) {
-                    once = 1;
-                    radial_menu_add_item(&menu_state->value, "New", menu_callback_new, NULL);
-                    radial_menu_add_item(&menu_state->value, "Open", menu_callback_open, NULL);
-                    radial_menu_add_item(&menu_state->value, "Save", menu_callback_save, NULL);
-                    radial_menu_add_item(&menu_state->value, "Exit", menu_callback_exit, NULL);
-                }
+                    static int once = 0;
+                    if (menu_state && !once) {
+                        once = 1;
+                        radial_menu_add_item(&menu_state->value, "New",  menu_callback_new, NULL);
+                        radial_menu_add_item(&menu_state->value, "Open", menu_callback_open, NULL);
+                        radial_menu_add_item(&menu_state->value, "Save", menu_callback_save, NULL);
+                        radial_menu_add_item(&menu_state->value, "Exit", menu_callback_exit, NULL);
+                    }
             ui_end_panel(gc.ui_ctx);
 
         ui_end_panel(gc.ui_ctx);
@@ -3204,10 +3449,16 @@ void render_debug_screen(void)
     {
         if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->hot_block_id)
         {
-            i32 screen_x, screen_y;
-            ui_block_to_screen_coords(gc.ui_ctx->blocks[i], gc.ui_ctx->blocks[i]->x, gc.ui_ctx->blocks[i]->y, &screen_x, &screen_y);
-            draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_GREEN:COLOR_RED);
-            draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->scissor_region.w, gc.ui_ctx->blocks[i]->scissor_region.h, (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_LIME:COLOR_YELLOW);
+            i32 screen_x = gc.ui_ctx->blocks[i]->abs_x;
+            i32 screen_y = gc.ui_ctx->blocks[i]->abs_y;
+
+            draw_rect_outline_wh(&gc.draw_buffer, screen_x, screen_y, 
+                                 gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, 
+                                (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_GREEN:COLOR_RED);
+
+            draw_rect_outline_wh(&gc.draw_buffer, screen_x, screen_y, 
+                                  gc.ui_ctx->blocks[i]->scissor_region.w, gc.ui_ctx->blocks[i]->scissor_region.h,
+                                 (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_LIME:COLOR_YELLOW);
             // draw_aaline(&gc.draw_buffer, screen_x, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
             // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y+gc.ui_ctx->blocks[i]->h, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
             // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
@@ -3219,9 +3470,10 @@ void render_debug_screen(void)
     {
         if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id)
         {
-            i32 screen_x, screen_y;
-            ui_block_to_screen_coords(gc.ui_ctx->blocks[i], gc.ui_ctx->blocks[i]->x, gc.ui_ctx->blocks[i]->y, &screen_x, &screen_y);
-            draw_rect_outline_wh(&gc.draw_buffer,screen_x , screen_y, gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, COLOR_LIME);
+            i32 screen_x = gc.ui_ctx->blocks[i]->abs_x;
+            i32 screen_y = gc.ui_ctx->blocks[i]->abs_y;
+            draw_rect_outline_wh(&gc.draw_buffer, screen_x, screen_y,
+                                 gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, COLOR_LIME);
         }
     }
 
@@ -3234,8 +3486,23 @@ void render_floating_panel_test(void)
 
     PROFILE("Building UI Tree")
     {
-        ui_begin_panel_floating(gc.ui_ctx, "Root", 200, 300, 400, 200);
+        ui_begin_panel_floating(gc.ui_ctx, "Root", 200, 300, 400, 200, VERTICAL_LAYOUT);
+
+            if(ui_button(gc.ui_ctx, "test_floating"))
+            {
+                radial_menu_map_t *menu_state = ui_radial_menu_modal(gc.ui_ctx, "testing_modal", 200.0f);
+                    static int only_once = 0;
+                    if (menu_state && !only_once) {
+                        only_once = 1;
+                        radial_menu_add_item(&menu_state->value, "New",  menu_callback_new, NULL);
+                        radial_menu_add_item(&menu_state->value, "Open", menu_callback_open, NULL);
+                        radial_menu_add_item(&menu_state->value, "Save", menu_callback_save, NULL);
+                        radial_menu_add_item(&menu_state->value, "Exit", menu_callback_exit, NULL);
+                    }
+            }
+            ui_button(gc.ui_ctx, "test_floating2");
         ui_end_panel(gc.ui_ctx);
+        
     }
 
     PROFILE("UI Layout")
@@ -3269,22 +3536,19 @@ void render_all(void)
     
     ui_new_frame(gc.ui_ctx);
 
-    render_todo_screen();
+    // render_todo_screen();
+    PROFILE("Layout Screen"){
+        render_layout_test_screen();
+        // render_floating_panel_test();
+    }
 
-    PROFILE("UI Layout")
-    {
-        ui_layout(gc.ui_ctx);
-    }
-    PROFILE("UI Rendering")
-    {
-        ui_render(gc.ui_ctx);
-    }
     reset_input_for_frame(); 
-
  
     if(gc.debug)
     {
-        render_debug_screen();
+        PROFILE("Debug Screen"){
+            render_debug_screen();
+        }
     }
 
     prof_buf_count = 0;
@@ -3482,6 +3746,11 @@ int main(void)
 
     while(!glfwWindowShouldClose((GLFWwindow*)gc.window))
     {
+        PROFILE("Events")
+        {
+            poll_events();
+        }
+
         PROFILE("Updating All")
         {
             update_all();
@@ -3492,14 +3761,12 @@ int main(void)
             render_all();
         }
         
-        PROFILE("Events")
-        {
-            poll_events();
-        }
-        
         cleanup_all();
 
-        present_frame(&gc.draw_buffer);
+        PROFILE("Presenting The frame")
+        {
+            present_frame(&gc.draw_buffer);
+        }
     }
     return 0;
 }

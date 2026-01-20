@@ -163,6 +163,9 @@ static inline f32 smoothstep(f32 edge0, f32 edge1, f32 x)
     return t * t * (3.0f - 2.0f * t);
 }
 
+/*
+    TODO: Check if its really faster
+ */
 f32 d_sqrt(f32 number)
 {
     i32 i;
@@ -1624,6 +1627,33 @@ int get_core_count(void)
     #endif
 }
 
+void atomic_inc(atomic_int_t* var)
+{
+    #ifdef _WIN32
+        InterlockedIncrement(var);
+    #else
+        atomic_fetch_add(var, 1);
+    #endif
+}
+
+void atomic_dec(atomic_int_t* var)
+{
+    #ifdef _WIN32
+        InterlockedDecrement(var);
+    #else
+        atomic_fetch_sub(var, 1);
+    #endif
+}
+
+int atomic_load_int(atomic_int_t* var)
+{
+    #ifdef _WIN32
+        return InterlockedCompareExchange(var, 0, 0);  // Atomic read trick
+    #else
+        return atomic_load(var);
+    #endif
+}
+
 thread_handle_t create_thread(thread_func_t func, thread_func_param_t data)
 {
     #ifdef _WIN32
@@ -1816,7 +1846,11 @@ thread_func_ret_t thread_loop(thread_func_param_t param)
     {
         mutex_lock(&pool->queue_mutex);
         {
-            while (arrlen(pool->jobs) == 0 && !pool->should_terminate) 
+            /*
+                sleep as long as there are no pending jobs
+             */
+            while (arrlen(pool->jobs) == 0 &&
+                   !pool->should_terminate) 
             {
                 cond_wait(&pool->mutex_condition, &pool->queue_mutex);
             }
@@ -1826,12 +1860,17 @@ thread_func_ret_t thread_loop(thread_func_param_t param)
                 mutex_unlock(&pool->queue_mutex);
                 return 0;
             }
+            /*
+                pull the job from the queue
+             */
             job = pool->jobs[0];
             arrdel(pool->jobs, 0);
         }
         mutex_unlock(&pool->queue_mutex);
         
+        atomic_inc(&pool->active_jobs);
         job.func(job.data);
+        atomic_dec(&pool->active_jobs);
     }
     
     return 0;
@@ -1845,7 +1884,8 @@ thread_pool_t* threadpool_create(void)
     pool->threads = NULL;  
     pool->jobs = NULL;     
     pool->should_terminate = false;
-    
+    pool->active_jobs = 0; 
+
     mutex_init(&pool->queue_mutex);
     cond_init(&pool->mutex_condition);
     
@@ -1894,21 +1934,29 @@ void threadpool_queue_job(thread_pool_t* pool, job_func_t func, void* data)
     }
     mutex_unlock(&pool->queue_mutex);
     
+    // notify a thread to pick up the job
     cond_signal(&pool->mutex_condition);
 }
 
+/*
+    there is neither pending nor in progress jobs
+ */
 bool threadpool_busy(thread_pool_t* pool)
 {
     bool busy = false;
     
     mutex_lock(&pool->queue_mutex);
     {
-        bool busy = (arrlen(pool->jobs) > 0);
+        busy = (arrlen(pool->jobs) > 0 ||
+                pool->active_jobs > 0); 
     }
     mutex_unlock(&pool->queue_mutex);
     
     return busy;
 }
+
+
+/* -------------------- Processes stuff -------------------- */
 
 int set_non_blocking(pipe_handle fd)
 {

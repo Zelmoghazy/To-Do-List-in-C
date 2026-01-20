@@ -175,6 +175,13 @@ int socket_tcp_socket(Socket *sock, const char *ip, const char *port)
 
     int err;
     /* Make it protocol independent */
+
+    /*
+       The getaddrinfo() function allocates and initializes a linked list
+       of addrinfo structures, one for each network address that matches
+       node and service, subject to any restrictions imposed by hints,
+       and returns a pointer to the start of the list in res.
+    */
     if ((err = getaddrinfo(ip, port, &hints, &res)) != 0) 
     {
         fprintf(stderr, "getaddrinfo error: %s\n", gai_strerrorA(err));
@@ -190,8 +197,9 @@ int socket_tcp_socket(Socket *sock, const char *ip, const char *port)
     */
     for(p = res; p != NULL; p = p->ai_next) 
     {
-        // Create a TCP/IP stream socket
-        // MSDN say using socket() The socket that is created will have the overlapped attribute as a default.
+        // Create a TCP/IP stream socket (end point for communication)
+        // MSDN say using socket() The socket that is created will have 
+        // the overlapped attribute as a default.
         // found conflicting info online so I will just be safe
         sock->sockfd = create_overlapped_socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 
@@ -204,7 +212,11 @@ int socket_tcp_socket(Socket *sock, const char *ip, const char *port)
         // Non-blocking IO
         socket_set_non_blocking(sock->sockfd);
 
-        // bind the port to the socket
+        /* 
+            bind the port to the socket
+            when a socket is create it exists in a name space but has no address assigned to it yet
+            server must bind the socket to a known port so it can be found
+        */
         if (bind(sock->sockfd, p->ai_addr, (int)p->ai_addrlen) == SOCKET_ERROR) 
         {
             snprintf(last_error, sizeof(last_error), "Binding failed: %d", WSAGetLastError());
@@ -236,6 +248,13 @@ int socket_tcp_socket(Socket *sock, const char *ip, const char *port)
 
     int err;
     /* Make it protocol independent */
+
+    /*
+       The getaddrinfo() function allocates and initializes a linked list
+       of addrinfo structures, one for each network address that matches
+       node and service, subject to any restrictions imposed by hints,
+       and returns a pointer to the start of the list in res.
+    */
     if ((err = getaddrinfo(ip, port, &hints, &res)) < 0) 
     {
         fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(err));
@@ -291,7 +310,10 @@ int socket_tcp_socket(Socket *sock, const char *ip, const char *port)
 int socket_listen_connection(Socket *sock)
 {
 #ifdef _WIN32
-    /* Convert socket to listening socket */
+    /* 
+        Convert socket to listening socket that will 
+        be used to accept incoming connection requests
+    */
     if (listen(sock->sockfd, BACKLOG) == SOCKET_ERROR)
     {          
         closesocket(sock->sockfd);
@@ -348,7 +370,7 @@ socket_handle socket_accept_connection(Socket *sock)
         int error = WSAGetLastError();
         if (error == WSAEWOULDBLOCK || error == WSAEINTR) 
         {
-            // normal accept doesnt block
+            // normal, accept doesnt block
             return INVALID_SOCKET;
         }
         else
@@ -463,6 +485,9 @@ socket_handle socket_get_handle(const Socket *sock)
     return sock->sockfd;
 }
 
+/*
+    INSANE STUFF !! JUST TO GET THE IP address
+*/
 char* socket_get_host_ip_addr(char *buffer, size_t bufsize)
 {
 #ifdef _WIN32
@@ -789,7 +814,7 @@ int socket_send(socket_handle sockfd, const void *data, size_t length)
         return 0;
     }
 
-    int ret = send(sockfd, data, length, 0);
+    int ret = send(sockfd, data, (int)length, 0);
 
     if (ret < 0) {
 #ifdef _WIN32
@@ -864,7 +889,7 @@ void socket_set_opt_reuse_addr(socket_handle sockfd, int on)
     * Not the same behaviour on windows 
     * Once the second socket has successfully bound, the behavior for all sockets bound to that port is indeterminate.
     * For example, if all of the sockets on the same port provide TCP service, any incoming TCP connection requests 
-    * over the port cannot be guaranteed to be handled by the correct socket — the behavior is non-deterministic
+    * over the port cannot be guaranteed to be handled by the correct socket the behavior is non-deterministic
     */
     BOOL optval = on ? TRUE : FALSE;
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&optval, sizeof(optval)) == SOCKET_ERROR) {

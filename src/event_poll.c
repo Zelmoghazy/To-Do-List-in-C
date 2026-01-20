@@ -304,11 +304,11 @@ void event_poll_loop(event_poll_t *ep, event_callbacks_t *callbacks, void *user_
         // Wait for I/O completions
         // put the calling thread to sleep until an entry 
         // appears in the specified completion port's I/O completion queue
-        BOOL result = GetQueuedCompletionStatus(ep->iocp, // Monitored completion port
-                                                &bytes, // the number of bytes transferred
-                                                &key, // the completion key
-                                                &overlapped, // he address of the OVERLAPPED structure.
-                                                100); // specified time-out
+        BOOL result = GetQueuedCompletionStatus(ep->iocp,     // Monitored completion port
+                                                &bytes,       // the number of bytes transferred
+                                                &key,         // the completion key
+                                                &overlapped,  // he address of the OVERLAPPED structure.
+                                                100);         // specified time-out TODO: use it for keep alive
         DWORD dwError = GetLastError();
 
         if (!result && !overlapped && dwError == WAIT_TIMEOUT) {
@@ -662,60 +662,7 @@ int event_poll_remove_ctx(event_poll_t *ep, event_ctx_t*ctx)
     return 0;
 }
 
-void event_poll_handle_client_event(void *user_data, uint32_t events)
-{
-    char buf[4096]; 
-
-    event_ctx_t*ctx = (event_ctx_t*)user_data;
-
-    if (events & EVENT_READ) 
-    {
-        for (;;) 
-        {
-            // ---
-            ssize_t n = recv(ctx->fd, buf, sizeof(buf), 0);
-
-            if (n > 0) 
-            {
-
-            } 
-            else if (n == 0) 
-            {
-                 // EOF encountered
-                event_poll_remove_ctx(ctx->ep, ctx);
-                return;
-            } 
-            else 
-            {
-                /*
-                    With EPOLLET When you get EPOLLIN, you must read until EAGAIN. 
-                    If you leave unread data You will not get another event.
-                    With EPOLLONESHOT after callback finishes handling the event 
-                    (reading everything until EAGAIN), epoll will not send any 
-                    more events, we need to rearm it manually its used mainly to
-                    make it thread safe and no two threads can handle same fd at 
-                    same time, ONESHO ensures only one thread handles the event.
-                 */
-                if (errno == EAGAIN || errno == EWOULDBLOCK) 
-                {
-                    // read end normally
-                    // drained -> ok to re-arm
-                    break;
-                } 
-                else 
-                {
-                    // real error
-                    perror("read");
-                    event_poll_remove_ctx(ctx->ep, ctx);
-                    return;
-                }
-            }
-        }
-    }
-    event_poll_modify_ctx(ctx->ep, ctx, EVENT_READ | EVENT_ET | EVENT_ONESHOT);
-}
-
-void event_poll_handle_new_connection(event_poll_t *ep)
+void event_poll_handle_new_connection(event_poll_t *ep, void *user_data)
 {
     // call accept as many times as we can
     for (;;) 
@@ -734,11 +681,15 @@ void event_poll_handle_new_connection(event_poll_t *ep)
         socket_set_non_blocking(new_fd);
 
         event_ctx_t*ctx = malloc(sizeof(event_ctx_t));
+         if (!client_ctx) {
+            close(new_fd);
+            continue;
+        }
         memset(ctx, 0, sizeof(event_ctx_t));
 
         ctx->fd = new_fd;
         ctx->ep = ep;
-        ctx->callback = event_poll_handle_client_event;
+        ctx->user_data = user_data;
 
         /*
             With edge triggered You get an event only when new data arrives
@@ -757,11 +708,18 @@ void event_poll_handle_new_connection(event_poll_t *ep)
             free(ctx);
             continue;
         }
+
+        if (ep->callbacks->on_accept) {
+            ep->callbacks->on_accept(user_data, new_fd);
+        }
     }
 }
 
-void event_poll_loop(event_poll_t *ep) 
+void event_poll_loop(event_poll_t *ep ,event_callbacks_t *callbacks, void *user_data) 
 {
+    if(!ep || !callbacks)
+        return;
+
     /*
         typedef union epoll_data {
             void    *ptr;           // Pointer to user-defined data 
@@ -822,25 +780,78 @@ void event_poll_loop(event_poll_t *ep)
             // New connection on listener
             if (ctx->fd == socket_get_socket(&ep->listener)) 
             {
-                event_poll_handle_new_connection(ep);
+                event_poll_handle_new_connection(ep, user_data);
             }
             // Existing connection
             else 
             {
                 if (events[i].events & (EPOLLHUP | EPOLLERR)) 
                 {
+                    if (ep->callbacks->on_error) {
+                        ep->callbacks->on_error(ctx->user_data, ctx->fd, errno);
+                    }
                     event_poll_remove_ctx(ep, ctx);
-                    close(ctx->fd);
-                    free(ctx);
-                } 
-                else if (ctx->callback) 
-                {
-                    uint32_t ev = 0;
-                    if (events[i].events & EPOLLIN) ev |= EVENT_READ;
-                    if (events[i].events & EPOLLOUT) ev |= EVENT_WRITE;
-                    
-                    ctx->callback(ctx, ev);
+                    continue;
                 }
+
+                if (events[i].events & EPOLLIN) 
+                {
+                    char buffer[4096];
+
+                    for (;;) 
+                    {
+                        // ---
+                        ssize_t n = recv(ctx->fd, buf, sizeof(buf), 0);
+
+                        if (n > 0) 
+                        {
+                            if (ep->callbacks->on_receive) {
+                                ep->callbacks->on_receive(ctx->user_data, ctx->fd, buffer, n);
+                            }
+                        } 
+                        else if (n == 0) 
+                        {
+                             // EOF encountered
+                            printf("Client disconnected (fd: %d)\n", ctx->fd);
+                            
+                            if (ep->callbacks->on_disconnect) {
+                                ep->callbacks->on_disconnect(ctx->user_data, ctx->fd);
+                            }
+                            event_poll_remove_ctx(ctx->ep, ctx);
+                            return;
+                        } 
+                        else 
+                        {
+                            /*
+                                With EPOLLET When you get EPOLLIN, you must read until EAGAIN. 
+                                If you leave unread data You will not get another event.
+                                With EPOLLONESHOT after callback finishes handling the event 
+                                (reading everything until EAGAIN), epoll will not send any 
+                                more events, we need to rearm it manually its used mainly to
+                                make it thread safe and no two threads can handle same fd at 
+                                same time, ONESHO ensures only one thread handles the event.
+                             */
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) 
+                            {
+                                // read end normally
+                                // drained -> ok to re-arm
+                                break;
+                            } 
+                            else 
+                            {
+                                // real error
+                                perror("read");
+                                if (ep->callbacks->on_error) {
+                                    ep->callbacks->on_error(ctx->user_data, ctx->fd, errno);
+                                }
+                                event_poll_remove_ctx(ctx->ep, ctx);
+                                return;
+                            }
+                        }
+                    }
+                }
+                // re arm again
+                event_poll_modify_ctx(ctx->ep, ctx, EVENT_READ | EVENT_ET | EVENT_ONESHOT);
             }
         }
     }

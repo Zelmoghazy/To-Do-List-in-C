@@ -275,11 +275,12 @@ typedef double      f64;
     typedef HANDLE thread_handle_t;
     typedef DWORD (WINAPI *thread_func_t)(LPVOID);
     typedef LPVOID thread_func_param_t;
-    typedef DWORD WINAPI thread_func_ret_t;
+    typedef DWORD thread_func_ret_t;
     typedef CONDITION_VARIABLE cond_handle_t;
     typedef CRITICAL_SECTION mutex_handle_t;
     typedef HANDLE pipe_handle;
     typedef HANDLE event_handle;
+    typedef volatile LONG atomic_int_t;
 #else
     typedef pthread_t thread_handle_t;
     typedef void* (*thread_func_t)(void*);
@@ -293,6 +294,7 @@ typedef double      f64;
         pthread_cond_t cond;
         bool signaled;
     }event_handle;
+    typedef atomic_int atomic_int_t;
 #endif
 
 global_variable u32 sign32     = 0x80000000;
@@ -437,6 +439,7 @@ typedef struct
     job_t* jobs;                   
     mutex_handle_t queue_mutex;
     cond_handle_t mutex_condition;
+    atomic_int_t active_jobs; 
     bool should_terminate;
 } thread_pool_t;
 

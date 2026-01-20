@@ -12,17 +12,21 @@
 
 #include "stb_truetype.h"
 
-#define STAR_ICON       u8"\uf005"
-#define CALENDAR_ICON   u8"\ueab0"
-#define TIME_ICON       u8"\ue641"
-#define NOTE_ICON       u8"\ueb26"
-#define PLUS_ICON       u8"\uf067"
-#define CHECK_ICON      u8"\uf05d"
-#define CLOSE_ICON      u8"\uf00d"
-#define CHECK_LIST_ICON u8"\uf0ae"
-#define ADD_ICON        u8"\ueadc"
-#define REMOVE_ICON     u8"\uf00d"
-#define EDIT_ICON       u8"\uf044"
+#define STAR_ICON           u8"\uf005"
+#define CALENDAR_ICON       u8"\ueab0"
+#define TIME_ICON           u8"\ue641"
+#define NOTE_ICON           u8"\ueb26"
+#define PLUS_ICON           u8"\uf067"
+#define CHECK_ICON          u8"\uf05d"
+#define CLOSE_ICON          u8"\uf00d"
+#define CHECK_LIST_ICON     u8"\uf0ae"
+#define ADD_ICON            u8"\ueadc"
+#define REMOVE_ICON         u8"\uf00d"
+#define EDIT_ICON           u8"\uf044"
+#define DOWN_ARROW          u8"\uf063"
+#define UP_ARROW            u8"\uf062"
+#define RIGHT_CIRCLE_ARROW  u8"\uf0a9"
+#define DOWN_CIRCLE_ARROW  u8"\uf0ab"
 
 #define GLYPH_CACHE_SIZE 120
 
