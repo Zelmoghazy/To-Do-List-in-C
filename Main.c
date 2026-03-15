@@ -274,6 +274,7 @@ struct context_t
     f32                 side_panel_x;
     i32                 curr_list;
 
+    image_view_t        *my_texture;
     /* Text */
     font_tt             *font;
     font_tt             *icon_font;
@@ -1026,9 +1027,14 @@ void ui_handle_mouse_button(ui_context_t *ctx)
             {
                 ctx->active_block_id = target->id;
 
-                target->clicked = true;
                 printf("Block : %s clicked\n", target->title);
-
+                if(!target->clicked)
+                {
+                    target->clicked = true;
+                    if(!animation_get(target->id+1, &target->active_anim_t)){
+                        animation_start((u64)target->id+1, 0.0f, 1.0f, 0.1f, EASE_IN_OUT_CUBIC);
+                    }
+                }
                 rect_t drag_rect;
                 hit_region_t region = is_in_hit_region(target, gc.mouse_x, gc.mouse_y, &drag_rect);
 
@@ -1838,7 +1844,7 @@ bool ui_checkbox(ui_context_t *ctx, char *title)
 
 /* -------------- Button Widget Stuff -------------- */
 
-void ui_render_button(ui_block_t *block)
+/* void ui_render_button(ui_block_t *block)
 {
     // color4_t color = block->hover?block->hover_color:block->bg_color;
     color4_t color = color4_lerp(block->bg_color,HEX_TO_COLOR4(0x47c179), block->hot_anim_t);
@@ -1848,7 +1854,8 @@ void ui_render_button(ui_block_t *block)
     float scaled_h = block->h * scale;
     float offset_x = (scaled_w - block->w) * 0.5f;
     float offset_y = (scaled_h - block->h) * 0.5f;
-    if (block->hot_anim_t > 0.01f) {
+    if (block->hot_anim_t > 0.01f) 
+    {
         color4_t glow = HEX_TO_COLOR4(0x95d9ae);
         float border_thickness = 2.0f * block->hot_anim_t;
         ui_draw_rounded_rect_in_block(block,
@@ -1860,6 +1867,46 @@ void ui_render_button(ui_block_t *block)
     }
     ui_draw_rounded_rect_in_block(block, 0, 0,
                                   block->w, block->h, color);
+    ui_render_text_in_block(block);
+} */
+
+void ui_render_button(ui_block_t *block)
+{
+    color4_t color = color4_lerp(block->bg_color, HEX_TO_COLOR4(0x47c179), block->hot_anim_t);
+    color = color4_lerp(color, lite(HEX_TO_COLOR4(0x47c179)), block->active_anim_t);
+
+    float scale = WEIGHTED2(1.0f,
+                            block->hot_anim_t, 0.05f,         // grows a bit when hovered
+                            block->active_anim_t, -0.04f);    // shrinks a bit when pressed.
+
+
+    float scaled_w = block->w * scale;
+    float scaled_h = block->h * scale;
+
+    // offset from center rather than top left
+    float offset_x = (scaled_w - block->w) * 0.5f;
+    float offset_y = (scaled_h - block->h) * 0.5f;
+
+    float press_offset_y = block->active_anim_t * 3.0f;
+
+    if (block->hot_anim_t > 0.01f)
+    {
+        color4_t glow = HEX_TO_COLOR4(0x95d9ae);
+        float border_thickness = 2.0f * block->hot_anim_t;
+        ui_draw_rounded_rect_in_block(block,
+            - offset_x - border_thickness,
+            - offset_y - border_thickness + press_offset_y,
+            scaled_w + border_thickness * 2,
+            scaled_h + border_thickness * 2,
+            glow);
+    }
+
+    ui_draw_rounded_rect_in_block(block,
+        -offset_x,
+        -offset_y + press_offset_y,
+        scaled_w, scaled_h,
+        color);
+
     ui_render_text_in_block(block);
 }
 
@@ -1879,6 +1926,11 @@ bool ui_button(ui_context_t *ctx, char *title)
     if(!animation_get(button->id, &button->hot_anim_t))
     {
         button->hot_anim_t = button->hover;
+    }
+
+    if(!animation_get(button->id+1, &button->active_anim_t))
+    {
+        button->active_anim_t = button->clicked;
     }
 
     bool release = button->released;
@@ -3175,6 +3227,7 @@ void blit_to_screen(void *pixels, u32 width, u32 height)
 {
     glBindTexture(GL_TEXTURE_2D, gc.texture);
 
+    // update it with the new frame
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 
                     (int)width, (int)height,
                     GL_RGBA, GL_UNSIGNED_BYTE, pixels);
@@ -3482,27 +3535,12 @@ void render_debug_screen(void)
 
 void render_floating_panel_test(void)
 {
-    text_edit_state_t *text_state = NULL;
-
     PROFILE("Building UI Tree")
     {
         ui_begin_panel_floating(gc.ui_ctx, "Root", 200, 300, 400, 200, VERTICAL_LAYOUT);
-
-            if(ui_button(gc.ui_ctx, "test_floating"))
-            {
-                radial_menu_map_t *menu_state = ui_radial_menu_modal(gc.ui_ctx, "testing_modal", 200.0f);
-                    static int only_once = 0;
-                    if (menu_state && !only_once) {
-                        only_once = 1;
-                        radial_menu_add_item(&menu_state->value, "New",  menu_callback_new, NULL);
-                        radial_menu_add_item(&menu_state->value, "Open", menu_callback_open, NULL);
-                        radial_menu_add_item(&menu_state->value, "Save", menu_callback_save, NULL);
-                        radial_menu_add_item(&menu_state->value, "Exit", menu_callback_exit, NULL);
-                    }
-            }
+            ui_button(gc.ui_ctx, "test_floating");
             ui_button(gc.ui_ctx, "test_floating2");
         ui_end_panel(gc.ui_ctx);
-        
     }
 
     PROFILE("UI Layout")
@@ -3516,6 +3554,36 @@ void render_floating_panel_test(void)
     }
 
     reset_input_for_frame(); 
+}
+
+void render_interactive_texture(void)
+{
+    static rect_t new_pos = {100, 100, 0, 0};
+    static i32 drag_offset_x = 0;
+    static i32 drag_offset_y = 0;
+    static bool dragging = false;
+
+    if (gc.left_button_down)
+    {
+        if (!dragging && inside_rect(gc.mouse_x, gc.mouse_y, &new_pos))
+        {
+            dragging = true;
+            drag_offset_x = gc.mouse_x - new_pos.x;
+            drag_offset_y = gc.mouse_y - new_pos.y;
+        }
+
+        if (dragging)
+        {
+            new_pos.x = gc.mouse_x - drag_offset_x;
+            new_pos.y = gc.mouse_y - drag_offset_y;
+            draw_rect_outline_wh(&gc.draw_buffer, new_pos.x, new_pos.y, new_pos.w, new_pos.h, HEX_TO_COLOR4(0x61605e));
+        }
+    }
+    else
+    {
+        dragging = false;
+    }
+    render_texture_to_buffer(&gc.draw_buffer, gc.my_texture, new_pos.x, new_pos.y, 5.0f, &new_pos);
 }
 
 void render_all(void)
@@ -3536,10 +3604,11 @@ void render_all(void)
     
     ui_new_frame(gc.ui_ctx);
 
-    // render_todo_screen();
-    PROFILE("Layout Screen"){
-        render_layout_test_screen();
-        // render_floating_panel_test();
+    PROFILE("Main screen"){
+        // render_layout_test_screen();
+        render_interactive_texture();
+        render_floating_panel_test();
+        // render_todo_screen();
     }
 
     reset_input_for_frame(); 
@@ -3602,11 +3671,12 @@ void init_framebuffer(i32 max_width, i32 max_height)
     glGenTextures(1, &gc.texture);
     glBindTexture(GL_TEXTURE_2D, gc.texture);
 
-    // Generate a full screen texture
+    // Generate a full screen texture and allocate required memory
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 
                  max_width, max_height,
                  0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     
+    // Filtering
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
@@ -3700,6 +3770,7 @@ bool init_all(void)
     gc.font = load_font_from_file("..\\Font\\Lato.ttf", 32.0f);
     gc.icon_font = load_font_from_file("..\\Font\\Icons.ttf", 32.0f);
 
+
     if(!(gc.font && gc.icon_font)){
         return false;
     }
@@ -3725,6 +3796,7 @@ bool init_all(void)
     
     set_dark_mode(gc.window);
     set_window_icon("..\\Resources\\icon.png");
+    gc.my_texture = load_texture("..\\Resources\\icon.png");
 
     gc.side_panel_x = 0.3;
 

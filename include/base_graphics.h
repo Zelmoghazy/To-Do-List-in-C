@@ -2,6 +2,8 @@
 #define BASE_GR_H_
 
 #include "util.h"
+#include "stb_image.h"
+#include "stb_ds.h"
 
 typedef struct 
 {
@@ -57,6 +59,25 @@ typedef struct
     f32 gap_factor;    
 } radial_layout_t;
 
+typedef struct 
+{
+    vec2f_t p0, p1, p2, p3;
+    bool is_cubic;
+    bool is_linear;
+}bezier_segment_t;
+
+typedef struct 
+{
+    bezier_segment_t *segments;
+    
+    int selected_segment;
+    int selected_point;  // 0=p0, 1=p1, 2=p2
+    bool is_dragging;
+
+    // bounding box
+    float min_x, min_y, max_x, max_y;
+} path_data_t;
+
 #define A(c)           ((u8) ((c) >> 24))
 #define R(c)           ((u8) ((c) >> 16))
 #define G(c)           ((u8) ((c) >>  8))
@@ -105,11 +126,18 @@ typedef struct
 
 #define MAX_SCISSOR_STACK 16
 
+#define QUAD_BEZIER_EVAL(p0, p1, p2, t)\
+        (vec2f_t){((1.0f - t)*(1.0f - t)*p0.x + 2*(1.0f - t)*t*p1.x + t*t*p2.x), \
+                  ((1.0f - t)*(1.0f - t)*p0.y + 2*(1.0f - t)*t*p1.y + t*t*p2.y)} 
+
+#define CUBIC_BEZIER_EVAL(p0, p1, p2, p3, t)\
+    (vec2f_t){(1.0f-t)*(1.0f-t)*(1.0f-t)*p0.x + 3*(1.0f-t)*(1.0f-t)*t*p1.x + 3*(1.0f-t)*t*t*p2.x + t*t*t*p3.x, \
+              (1.0f-t)*(1.0f-t)*(1.0f-t)*p0.y + 3*(1.0f-t)*(1.0f-t)*t*p1.y + 3*(1.0f-t)*t*t*p2.y + t*t*t*p3.y} 
+
 extern scissor_region_t scissor_stack[MAX_SCISSOR_STACK];
 extern u32 scissor_stack_size;
 extern rect_t current_scissor;
 extern bool scissor_enabled;
-
 
 #define TGA_HEADER(buf,w,h,b) \
     header[2]  = 2;\
@@ -121,7 +149,7 @@ extern bool scissor_enabled;
     header[17] |= 0x20 
 
 color4_t to_color4(vec3f_t const c);
-vec3f_t linear_to_gamma(vec3f_t color);
+color4_t linear_to_gamma(color4_t color);
 void hsv_to_rgb(f32 h, f32 s, f32 v, f32 *r, f32 *g, f32 *b);
 f32 gradient_noise(f32 x, f32 y);
 color4_t color4_lerp(color4_t c1, color4_t c2, f32 t);
@@ -199,6 +227,13 @@ void draw_radial_segment_filled(image_view_t *img,
                                 radial_layout_t *layout, 
                                  radial_segment_t *seg,
                                  color4_t color) ;
-void catmull_rom_point(f32 t, vertex_t p[4], vertex_t *out);
+void catmull_rom_vertex(f32 t, vertex_t p[4], vertex_t *out);
 
+path_data_t * path_new(void);
+void add_bezier_segment(path_data_t *path, vec2f_t p0, vec2f_t p1, vec2f_t p2, vec2f_t p3, bool is_cubic, bool is_linear); 
+
+image_view_t* load_texture(const char *filepath);
+void free_texture(image_view_t *texture);
+void render_texture_to_buffer(image_view_t const *color_buf, image_view_t const *texture, 
+                               u32 dst_x, u32 dst_y, f32 scale, rect_t *out_rect);
 #endif

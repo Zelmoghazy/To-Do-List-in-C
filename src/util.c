@@ -97,8 +97,12 @@ void dump_memory(void *ptr, i32 size)
     }
     return;
 }
+#ifdef _WIN32
+    __declspec(thread) u32 g_seed;
+#else
+    __thread u32 g_seed;
+#endif
 
-__declspec(thread) u32 g_seed;
 void fast_srand(u32 seed) 
 {
     g_seed = seed;
@@ -109,6 +113,27 @@ i32 fast_rand(void)
 {
     g_seed = (214013*g_seed+2531011);
     return (g_seed>>16)&0x7FFF;
+}
+
+/* ranged 0 to 1 */
+f32 f_randf(u32 index)
+{
+	index = (index << 13) ^ index;
+	return (((index * (index * index * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0f) * 0.5f;
+}
+
+/* ranged -1 to 1 */
+f32 f_randnf(u32 index)
+{
+	index = (index << 13) ^ index;
+	return (((index * (index * index * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0f) - 1.0f;
+}
+
+/* ranged 0 to INT32_MAX */
+i32 f_randi(u32 index)
+{
+	index = (index << 13) ^ index;
+	return ((index * (index * index * 15731 + 789221) + 1376312589) & 0x7fffffff);
 }
 
 u32 hash(u32 x)
@@ -659,6 +684,12 @@ mat4x4_t mat4x4_mult_simd(mat4x4_t const *m, mat4x4_t const *n)
     return res;
 }
 
+/*
+    - pre scale x by 1 / tan(fov/2) (so it maps to 1 after dividing)
+    - pre scale y by 1 / tan(fov/2) (so it maps to 1 after dividing)
+    - Map depth range [near, far] into [-1,1] after dividing.
+    - Create w = -z
+ */
 mat4x4_t mat_perspective(f32 n, f32 f, f32 fovY, f32 aspect_ratio)
 {
     f32 top   = n * tanf(fovY / 2.f);
@@ -672,13 +703,20 @@ mat4x4_t mat_perspective(f32 n, f32 f, f32 fovY, f32 aspect_ratio)
     };
 }
 
-mat4x4_t mat_orthographic(f32 l, f32 r, f32 bottom, f32 t, f32 n, f32 f)
+/*
+    - scale the range [a,b] of size (b-a), NDC has size 2, so required scale is 2/(b-a)
+    - translate the center to land on 0 from (a+b)/2
+    - x maps [left,right] -> [-1, 1]
+    - y maps [bottom,top] -> [-1, 1]
+    - z maps [near,far] -> [-1, 1]
+ */
+mat4x4_t mat_orthographic(f32 l, f32 r, f32 b, f32 t, f32 n, f32 f)
 {
     return (mat4x4_t) {
-        2.0f / (r - l),             0.0f,                       0.0f,                   -(r + l) / (r - l),            
-        0.0f,                       2.0f / (t - bottom),        0.0f,                   -(t + bottom) / (t - bottom),  
-        0.0f,                       0.0f,                       -2.0f / (f - n),        -(f + n) / (f - n),            
-        0.0f,                       0.0f,                       0.0f,                   1.0f                           
+        2.0f / (r - l),    0.0f,              0.0f,               -(r + l) / (r - l),            
+        0.0f,              2.0f / (t - b),    0.0f,               -(t + b) / (t - b),  
+        0.0f,              0.0f,              -2.0f / (f - n),    -(f + n) / (f - n),            
+        0.0f,              0.0f,              0.0f,               1.0f                           
     };
 }
 
@@ -1349,6 +1387,8 @@ void get_time(void *time)
     #endif
 }
 
+/* -------------------- File stuff -------------------- */
+
 const char* get_file_extension(const char *filepath)
 {
     const char* dot = strrchr(filepath, '.');
@@ -1357,6 +1397,61 @@ const char* get_file_extension(const char *filepath)
     }
     return dot+1;
 }
+
+unsigned char* read_file(const char* font_path)
+{
+    FILE *f = fopen(font_path, "rb");
+    if (!f) {
+        printf("Failed to open font file: %s\n", font_path);
+        return 0;
+    }
+    
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    unsigned char *buffer = malloc(size);
+    if (!buffer) {
+        printf("Failed to allocate font buffer\n");
+        fclose(f);
+        return NULL;
+    }
+    
+    size_t bytes_read = fread(buffer, 1, size, f);
+    fclose(f);
+    
+    if (bytes_read != (size_t)size) {
+        printf("Failed to read complete font file\n");
+        free(buffer);
+        buffer = NULL;
+        return NULL;
+    }
+    return buffer;
+}
+
+void skip_whitespace_and_commas(const char **p)
+{
+    while (**p && (isspace((unsigned char)**p) || **p == ','))
+        (*p)++;
+}
+
+int parse_float(const char **p, float *out)
+{
+    skip_whitespace_and_commas(p);
+    char *end;
+    *out = (float)strtod(*p, &end);
+    if (end == *p) return 0;
+    *p = end;
+    return 1;
+}
+
+int parse_two_floats(const char **p, float *x, float *y)
+{
+    return parse_float(p, x) && parse_float(p, y);
+}
+
+
+/* -------------------- System Info Stuff -------------------- */
 
 unsigned long get_page_size(void) 
 {
@@ -1381,238 +1476,237 @@ unsigned long get_allocation_granularity(void)
 }
 
 #ifdef _WIN32
-static PSYSTEM_LOGICAL_PROCESSOR_INFORMATION get_processor_info_buffer(DWORD* pCount) 
-{
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = NULL;
-    DWORD dwSize = 0;
-    
-    GetLogicalProcessorInformation(pBuffer, &dwSize);
-    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-        return NULL;
+    static PSYSTEM_LOGICAL_PROCESSOR_INFORMATION get_processor_info_buffer(DWORD* pCount) 
+    {
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = NULL;
+        DWORD dwSize = 0;
+        
+        GetLogicalProcessorInformation(pBuffer, &dwSize);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+            return NULL;
+        }
+        
+        pBuffer = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION)malloc(dwSize);
+        if (!pBuffer) {
+            return NULL;
+        }
+        
+        if (!GetLogicalProcessorInformation(pBuffer, &dwSize)) {
+            free(pBuffer);
+            return NULL;
+        }
+        
+        if (pCount) {
+            *pCount = dwSize / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+        }
+        
+        return pBuffer;
     }
-    
-    pBuffer = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION)malloc(dwSize);
-    if (!pBuffer) {
-        return NULL;
-    }
-    
-    if (!GetLogicalProcessorInformation(pBuffer, &dwSize)) {
+
+    int get_physical_core_count(void) 
+    {
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+        if (!pBuffer) return 0;
+        
+        int coreCount = 0;
+        DWORD byteOffset = 0;
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+        
+        while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+            sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) { // reasonable limit
+            if (ptr->Relationship == RelationProcessorCore) {
+                coreCount++;
+            }
+            byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+            ptr++;
+        }
+        
         free(pBuffer);
-        return NULL;
+        return coreCount;
     }
-    
-    if (pCount) {
-        *pCount = dwSize / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-    }
-    
-    return pBuffer;
-}
 
-int get_physical_core_count(void) 
-{
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
-    if (!pBuffer) return 0;
-    
-    int coreCount = 0;
-    DWORD byteOffset = 0;
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
-    
-    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
-           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) { // reasonable limit
-        if (ptr->Relationship == RelationProcessorCore) {
-            coreCount++;
-        }
-        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        ptr++;
-    }
-    
-    free(pBuffer);
-    return coreCount;
-}
-
-int get_logical_processor_count(void) 
-{
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
-    if (!pBuffer) return 0;
-    
-    int logicalCount = 0;
-    DWORD byteOffset = 0;
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
-    
-    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
-           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
-        if (ptr->Relationship == RelationProcessorCore) {
-            // Count bits in ProcessorMask to get number of logical processors for this core
-            ULONG_PTR mask = ptr->ProcessorMask;
-            while (mask) {
-                logicalCount += (mask & 1);
-                mask >>= 1;
-            }
-        }
-        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        ptr++;
-    }
-    
-    free(pBuffer);
-    return logicalCount;
-}
-
-BOOL has_hyperthreading(void) 
-{
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
-    if (!pBuffer) return FALSE;
-    
-    BOOL hasHT = FALSE;
-    DWORD byteOffset = 0;
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
-    
-    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
-           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
-        if (ptr->Relationship == RelationProcessorCore) {
-            // If Flags == 1, it's hyper-threaded
-            if (ptr->ProcessorCore.Flags == 1) {
-                hasHT = TRUE;
-                break;
-            }
-        }
-        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        ptr++;
-    }
-    
-    free(pBuffer);
-    return hasHT;
-}
-
-
-int get_numa_node_count(void) 
-{
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
-    if (!pBuffer) return 0;
-    
-    int numaCount = 0;
-    DWORD byteOffset = 0;
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
-    
-    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
-           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
-        if (ptr->Relationship == RelationNumaNode) {
-            numaCount++;
-        }
-        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        ptr++;
-    }
-    
-    free(pBuffer);
-    return numaCount;
-}
-
-void get_cache_info(int cacheLevel, int* lineSize, DWORD64* size) 
-{
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
-    if (!pBuffer) {
-        if (lineSize) *lineSize = 0;
-        if (size) *size = 0;
-        return;
-    }
-    
-    DWORD byteOffset = 0;
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
-    
-    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
-           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
-        if (ptr->Relationship == RelationCache) {
-            if (ptr->Cache.Level == cacheLevel) {
-                if (lineSize) *lineSize = ptr->Cache.LineSize;
-                if (size) *size = ptr->Cache.Size;
-                break;
-            }
-        }
-        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        ptr++;
-    }
-    
-    free(pBuffer);
-}
-
-int get_socket_count(void) 
-{
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
-    if (!pBuffer) return 0;
-    
-    int socketCount = 0;
-    DWORD byteOffset = 0;
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
-    
-    while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
-           sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
-        if (ptr->Relationship == RelationProcessorPackage) {
-            socketCount++;
-        }
-        byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
-        ptr++;
-    }
-    
-    free(pBuffer);
-    return socketCount;
-}
-
-void print_detailed_processor_info(void) 
-{
-    DWORD count = 0;
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(&count);
-    if (!pBuffer) {
-        printf("Cannot get processor information\n");
-        return;
-    }
-    
-    int physicalCores = 0;
-    int logicalProcessors = 0;
-    
-    for (DWORD i = 0; i < count; i++) {
-        switch (pBuffer[i].Relationship) {
-            case RelationProcessorCore:
-                physicalCores++;
-                printf("Core %d: ", physicalCores);
-                if (pBuffer[i].ProcessorCore.Flags == 1) {
-                    printf("Hyper-Threaded ");
-                }
-                // Count logical processors in this core
-                int logicalInCore = 0;
-                ULONG_PTR mask = pBuffer[i].ProcessorMask;
+    int get_logical_processor_count(void) 
+    {
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+        if (!pBuffer) return 0;
+        
+        int logicalCount = 0;
+        DWORD byteOffset = 0;
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+        
+        while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+            sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+            if (ptr->Relationship == RelationProcessorCore) {
+                // Count bits in ProcessorMask to get number of logical processors for this core
+                ULONG_PTR mask = ptr->ProcessorMask;
                 while (mask) {
-                    logicalInCore += (mask & 1);
+                    logicalCount += (mask & 1);
                     mask >>= 1;
                 }
-                printf("(%d logical processors)\n", logicalInCore);
-                logicalProcessors += logicalInCore;
-                break;
-                
-            case RelationNumaNode:
-                printf("NUMA Node %d\n", pBuffer[i].NumaNode.NodeNumber);
-                break;
-                
-            case RelationCache:
-                printf("Cache: L%d, Size: %llu KB, Line: %d bytes\n",
-                       pBuffer[i].Cache.Level,
-                       pBuffer[i].Cache.Size / 1024,
-                       pBuffer[i].Cache.LineSize);
-                break;
-                
-            case RelationProcessorPackage:
-                printf("Physical Package/Socket\n");
-                break;
+            }
+            byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+            ptr++;
         }
+        
+        free(pBuffer);
+        return logicalCount;
     }
-    
-    printf("\nSummary:\n");
-    printf("  Physical Cores: %d\n", physicalCores);
-    printf("  Logical Processors: %d\n", logicalProcessors);
-    printf("  Sockets: %d\n", get_socket_count());
-    printf("  NUMA Nodes: %d\n", get_numa_node_count());
-    printf("  Hyper-Threading: %s\n", has_hyperthreading() ? "Enabled" : "Disabled");
-    
-    free(pBuffer);
-}
+
+    BOOL has_hyperthreading(void) 
+    {
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+        if (!pBuffer) return FALSE;
+        
+        BOOL hasHT = FALSE;
+        DWORD byteOffset = 0;
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+        
+        while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+            sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+            if (ptr->Relationship == RelationProcessorCore) {
+                // If Flags == 1, it's hyper-threaded
+                if (ptr->ProcessorCore.Flags == 1) {
+                    hasHT = TRUE;
+                    break;
+                }
+            }
+            byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+            ptr++;
+        }
+        
+        free(pBuffer);
+        return hasHT;
+    }
+
+    int get_numa_node_count(void) 
+    {
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+        if (!pBuffer) return 0;
+        
+        int numaCount = 0;
+        DWORD byteOffset = 0;
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+        
+        while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+            sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+            if (ptr->Relationship == RelationNumaNode) {
+                numaCount++;
+            }
+            byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+            ptr++;
+        }
+        
+        free(pBuffer);
+        return numaCount;
+    }
+
+    void get_cache_info(int cacheLevel, int* lineSize, DWORD64* size) 
+    {
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+        if (!pBuffer) {
+            if (lineSize) *lineSize = 0;
+            if (size) *size = 0;
+            return;
+        }
+        
+        DWORD byteOffset = 0;
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+        
+        while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+            sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+            if (ptr->Relationship == RelationCache) {
+                if (ptr->Cache.Level == cacheLevel) {
+                    if (lineSize) *lineSize = ptr->Cache.LineSize;
+                    if (size) *size = ptr->Cache.Size;
+                    break;
+                }
+            }
+            byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+            ptr++;
+        }
+        
+        free(pBuffer);
+    }
+
+    int get_socket_count(void) 
+    {
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(NULL);
+        if (!pBuffer) return 0;
+        
+        int socketCount = 0;
+        DWORD byteOffset = 0;
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = pBuffer;
+        
+        while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= 
+            sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) * 64) {
+            if (ptr->Relationship == RelationProcessorPackage) {
+                socketCount++;
+            }
+            byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+            ptr++;
+        }
+        
+        free(pBuffer);
+        return socketCount;
+    }
+
+    void print_detailed_processor_info(void) 
+    {
+        DWORD count = 0;
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION pBuffer = get_processor_info_buffer(&count);
+        if (!pBuffer) {
+            printf("Cannot get processor information\n");
+            return;
+        }
+        
+        int physicalCores = 0;
+        int logicalProcessors = 0;
+        
+        for (DWORD i = 0; i < count; i++) {
+            switch (pBuffer[i].Relationship) {
+                case RelationProcessorCore:
+                    physicalCores++;
+                    printf("Core %d: ", physicalCores);
+                    if (pBuffer[i].ProcessorCore.Flags == 1) {
+                        printf("Hyper-Threaded ");
+                    }
+                    // Count logical processors in this core
+                    int logicalInCore = 0;
+                    ULONG_PTR mask = pBuffer[i].ProcessorMask;
+                    while (mask) {
+                        logicalInCore += (mask & 1);
+                        mask >>= 1;
+                    }
+                    printf("(%d logical processors)\n", logicalInCore);
+                    logicalProcessors += logicalInCore;
+                    break;
+                    
+                case RelationNumaNode:
+                    printf("NUMA Node %d\n", pBuffer[i].NumaNode.NodeNumber);
+                    break;
+                    
+                case RelationCache:
+                    printf("Cache: L%d, Size: %llu KB, Line: %d bytes\n",
+                        pBuffer[i].Cache.Level,
+                        pBuffer[i].Cache.Size / 1024,
+                        pBuffer[i].Cache.LineSize);
+                    break;
+                    
+                case RelationProcessorPackage:
+                    printf("Physical Package/Socket\n");
+                    break;
+            }
+        }
+        
+        printf("\nSummary:\n");
+        printf("  Physical Cores: %d\n", physicalCores);
+        printf("  Logical Processors: %d\n", logicalProcessors);
+        printf("  Sockets: %d\n", get_socket_count());
+        printf("  NUMA Nodes: %d\n", get_numa_node_count());
+        printf("  Hyper-Threading: %s\n", has_hyperthreading() ? "Enabled" : "Disabled");
+        
+        free(pBuffer);
+    }
 #endif
 /* -------------------- Multithreading stuff -------------------- */
 
@@ -1624,6 +1718,15 @@ int get_core_count(void)
         return sysinfo.dwNumberOfProcessors;
     #else
         return sysconf(_SC_NPROCESSORS_ONLN);
+    #endif
+}
+
+void thread_sleep(uint32_t milliseconds) 
+{
+    #ifdef _WIN32
+        Sleep(milliseconds);
+    #else
+        usleep(milliseconds * 1000);
     #endif
 }
 
@@ -1768,7 +1871,7 @@ void cond_broadcast(cond_handle_t* cond)
 void event_create(event_handle *event)
 {
 #ifdef _WIN32
-    event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    *event = CreateEvent(NULL, FALSE, FALSE, NULL);
 #else
     pthread_mutex_init(event->mutex, NULL);
     pthread_cond_init(&event->cond, NULL);
@@ -1852,7 +1955,7 @@ thread_func_ret_t thread_loop(thread_func_param_t param)
             while (arrlen(pool->jobs) == 0 &&
                    !pool->should_terminate) 
             {
-                cond_wait(&pool->mutex_condition, &pool->queue_mutex);
+                cond_wait(&pool->work_available, &pool->queue_mutex);
             }
             
             if (pool->should_terminate) 
@@ -1871,6 +1974,19 @@ thread_func_ret_t thread_loop(thread_func_param_t param)
         atomic_inc(&pool->active_jobs);
         job.func(job.data);
         atomic_dec(&pool->active_jobs);
+
+        mutex_lock(&pool->queue_mutex);
+        {
+            /* 
+                No jobs left
+            */
+            if (arrlen(pool->jobs) == 0 &&
+                pool->active_jobs == 0)
+            {
+                cond_broadcast(&pool->idle_condition);
+            }
+        }
+        mutex_unlock(&pool->queue_mutex);
     }
     
     return 0;
@@ -1887,7 +2003,9 @@ thread_pool_t* threadpool_create(void)
     pool->active_jobs = 0; 
 
     mutex_init(&pool->queue_mutex);
-    cond_init(&pool->mutex_condition);
+
+    cond_init(&pool->work_available);
+    cond_init(&pool->idle_condition);
     
     uint32_t num_threads = get_core_count();
     
@@ -1909,7 +2027,7 @@ void threadpool_destroy(thread_pool_t* pool)
     }
     mutex_unlock(&pool->queue_mutex);
     
-    cond_broadcast(&pool->mutex_condition);
+    cond_broadcast(&pool->work_available);
     
     for (int i = 0; i < arrlen(pool->threads); ++i) {
         join_thread(pool->threads[i]);
@@ -1919,7 +2037,9 @@ void threadpool_destroy(thread_pool_t* pool)
     arrfree(pool->jobs);
     
     mutex_destroy(&pool->queue_mutex);
-    cond_destroy(&pool->mutex_condition);
+
+    cond_destroy(&pool->work_available);
+    cond_destroy(&pool->idle_condition);
     
     free(pool);
 }
@@ -1935,7 +2055,20 @@ void threadpool_queue_job(thread_pool_t* pool, job_func_t func, void* data)
     mutex_unlock(&pool->queue_mutex);
     
     // notify a thread to pick up the job
-    cond_signal(&pool->mutex_condition);
+    cond_signal(&pool->work_available);
+}
+
+void threadpool_wait(thread_pool_t* pool)
+{
+    mutex_lock(&pool->queue_mutex);
+
+    while (arrlen(pool->jobs) > 0 ||
+           pool->active_jobs > 0)
+    {
+        cond_wait(&pool->idle_condition, &pool->queue_mutex);
+    }
+
+    mutex_unlock(&pool->queue_mutex);
 }
 
 /*

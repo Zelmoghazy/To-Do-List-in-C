@@ -21,21 +21,63 @@ color4_t to_color4(vec3f_t const c)
     return color;
 }
 
-vec3f_t linear_to_gamma(vec3f_t color)
+/* 
+    Approximation gamma = 2.0, powf(x, 1.0f / 2.4) is more accurate
+    good enough for most cases
+*/
+color4_t linear_to_gamma(color4_t color)
 {
-    vec3f_t col = {0.0f,0.0f,0.0f};
+    color4_t col = {0.0f,0.0f,0.0f,0.0f};
 
-    if(color.x > 0){
-        col.x = sqrt_f32(color.x);
+    if(color.r > 0){
+        col.r = sqrt_f32(color.r);
     } 
-    if(color.y > 0){
-        col.y = sqrt_f32(color.y);
+    if(color.g > 0){
+        col.g = sqrt_f32(color.g);
     }
-    if(color.z > 0){
-        col.z = sqrt_f32(color.z);
+    if(color.b > 0){
+        col.b = sqrt_f32(color.b);
     }
+    col.a = color.a;
 
     return col;
+}
+
+/*
+    The definition uses two different functions – a straight line and an exponential curve – glued together at a certain “cutoff point”. The implication is that these functions (the ones in the sRGB to Linear definition) intersect at the point: (0.04045, 0.0031308)
+    - condition : 0 ≤ S ≤ 0.0404482362771082 , value L = S/12.92
+    - condition : 0.0404482362771082 < S ≤ 1, L = ((S+0.055)/1.055)^2.4
+ */
+float srgb_to_linear_f(float c) 
+{
+    if (c >1.0f) c = c / 255.0f;
+    return (c <= 0.04045f) ? (c / 12.92f) : powf((c + 0.055f) / 1.055f, 2.4f);
+}
+
+float linear_to_srgb_f(float c) 
+{
+    if (c >1.0f) c = c / 255.0f;
+    return (c <= 0.0031308f) ? (12.92f * c) : (1.055f * powf(c, 1.0f / 2.4f) - 0.055f);
+}
+
+color4_t srgb_to_linear(color4_t color) 
+{
+    return (color4_t){
+        (u8)(srgb_to_linear_f(color.r / 255.0f) * 255.0f + 0.5f),
+        (u8)(srgb_to_linear_f(color.g / 255.0f) * 255.0f + 0.5f),
+        (u8)(srgb_to_linear_f(color.b / 255.0f) * 255.0f + 0.5f),
+        (u8)color.a
+    };
+}
+
+color4_t linear_to_srgb(color4_t color) 
+{
+    return (color4_t){
+        (u8)(linear_to_srgb_f(color.r / 255.0f) * 255.0f + 0.5f),
+        (u8)(linear_to_srgb_f(color.g / 255.0f) * 255.0f + 0.5f),
+        (u8)(linear_to_srgb_f(color.b / 255.0f) * 255.0f + 0.5f),
+        (u8)color.a
+    };
 }
 
 /* 
@@ -74,6 +116,110 @@ void hsv_to_rgb(f32 h, f32 s, f32 v, f32 *r, f32 *g, f32 *b)
     }
 }
 
+/*
+    Perceptually uniform color space by Bjorn Ottosson
+    produces smooth, natural transitions without muddy
+    end points
+    Recommended for blending colors
+ */
+static color4_t srgb_to_oklab(color4_t c) 
+{
+    // Convert u8 to linear float [0,1]
+    float lR = srgb_to_linear_f(c.r / 255.0f);
+    float lG = srgb_to_linear_f(c.g / 255.0f);
+    float lB = srgb_to_linear_f(c.b / 255.0f);
+
+    float l_ = 0.4122214708f*lR + 0.5363325363f*lG + 0.0514459929f*lB;
+    float m_ = 0.2119034982f*lR + 0.6806995451f*lG + 0.1073969566f*lB;
+    float s_ = 0.0883024619f*lR + 0.2817188376f*lG + 0.6299787005f*lB;
+
+    float l_c = cbrtf(l_), m_c = cbrtf(m_), s_c = cbrtf(s_);
+
+    float L = 0.2104542553f*l_c + 0.7936177850f*m_c - 0.0040720468f*s_c;
+    float A = 1.9779984951f*l_c - 2.4285922050f*m_c + 0.4505937099f*s_c;
+    float B = 0.0259040371f*l_c + 0.7827717662f*m_c - 0.8086757660f*s_c;
+
+    // Pack L[0,1], A[-0.5,0.5], B[-0.5,0.5] into u8
+    // L is already roughly [0,1]; A and B are roughly [-0.4,0.4] — bias to [0,1]
+    return (color4_t){
+        (u8)(L * 255.0f + 0.5f),
+        (u8)((A + 0.5f) * 255.0f + 0.5f),
+        (u8)((B + 0.5f) * 255.0f + 0.5f),
+        c.a
+    };
+}
+
+static color4_t oklab_to_srgb(color4_t lab) 
+{
+    // Unpack u8 back to floats
+    float l = lab.r / 255.0f;
+    float a = (lab.g / 255.0f) - 0.5f;
+    float b = (lab.b / 255.0f) - 0.5f;
+
+    float l_c = l + 0.3963377774f*a + 0.2158037573f*b;
+    float m_c = l - 0.1055613458f*a - 0.0638541728f*b;
+    float s_c = l - 0.0894841775f*a - 1.2914855480f*b;
+
+    float l3 = l_c*l_c*l_c, m3 = m_c*m_c*m_c, s3 = s_c*s_c*s_c;
+
+    float R = +4.0767416621f*l3 - 3.3077115913f*m3 + 0.2309699292f*s3;
+    float G = -1.2684380046f*l3 + 2.6097574011f*m3 - 0.3413193965f*s3;
+    float B = -0.0041960863f*l3 - 0.7034186147f*m3 + 1.7076147010f*s3;
+
+    R = R < 0.0f ? 0.0f : (R > 1.0f ? 1.0f : R);
+    G = G < 0.0f ? 0.0f : (G > 1.0f ? 1.0f : G);
+    B = B < 0.0f ? 0.0f : (B > 1.0f ? 1.0f : B);
+
+    return (color4_t){
+        (u8)(linear_to_srgb_f(R) * 255.0f + 0.5f),
+        (u8)(linear_to_srgb_f(G) * 255.0f + 0.5f),
+        (u8)(linear_to_srgb_f(B) * 255.0f + 0.5f),
+        lab.a
+    };
+}
+
+// OKLCH: cylindrical form of OKLAB
+// Packing: L -> r [0,1], C -> g [0,~0.4 max, stored /0.5], H -> b [0,1]
+static color4_t oklab_to_oklch(color4_t lab) 
+{
+    float L = lab.r / 255.0f;
+    float a = (lab.g / 255.0f) - 0.5f;
+    float b = (lab.b / 255.0f) - 0.5f;
+
+    float C = sqrtf(a*a + b*b);
+    float H = atan2f(b, a) / (2.0f * 3.1415926535f);
+    if (H < 0.0f) H += 1.0f;
+
+    // C is in [0, ~0.4]; scale by /0.5 to fit [0,1] with headroom
+    return (color4_t){
+        (u8)(L * 255.0f + 0.5f),
+        (u8)((C / 0.5f) * 255.0f + 0.5f),
+        (u8)(H * 255.0f + 0.5f),
+        lab.a
+    };
+}
+
+static color4_t oklch_to_oklab(color4_t lch) 
+{
+    float L = lch.r / 255.0f;
+    float C = (lch.g / 255.0f) * 0.5f;
+    float H = lch.b / 255.0f;
+
+    float h_rad = H * 2.0f * 3.1415926535f;
+    float a = C * cosf(h_rad);
+    float b = C * sinf(h_rad);
+
+    return (color4_t){
+        (u8)(L * 255.0f + 0.5f),
+        (u8)((a + 0.5f) * 255.0f + 0.5f),
+        (u8)((b + 0.5f) * 255.0f + 0.5f),
+        lch.a
+    };
+}
+
+static color4_t srgb_to_oklch(color4_t c) { return oklab_to_oklch(srgb_to_oklab(c)); }
+static color4_t oklch_to_srgb(color4_t c) { return oklab_to_srgb(oklch_to_oklab(c)); }
+
 color4_t color4_lerp(color4_t c1, color4_t c2, f32 t)
 {
     t = Clamp(0.0f, t, 1.0f);
@@ -86,6 +232,26 @@ color4_t color4_lerp(color4_t c1, color4_t c2, f32 t)
     };
     
     return result;
+}
+
+color4_t color4_lerp_oklab(color4_t c1, color4_t c2, f32 t)
+{
+    t = Clamp(0.0f, t, 1.0f);
+
+    color4_t srgb1 =  linear_to_srgb(c1);
+    color4_t srgb2 =  linear_to_srgb(c2);
+
+    color4_t oklab1 =  srgb_to_oklab(srgb1);
+    color4_t oklab2 =  srgb_to_oklab(srgb2);
+    
+    color4_t result = {
+        .r = (u8)(LERP_F32(oklab1.r, oklab2.r ,t)),
+        .g = (u8)(LERP_F32(oklab1.g, oklab2.g ,t)),
+        .b = (u8)(LERP_F32(oklab1.b, oklab2.b ,t)),
+        .a = (u8)(LERP_F32(oklab1.a, oklab2.a ,t))
+    };
+
+    return oklab_to_srgb(result);
 }
 
 color4_t average(color4_t c, color4_t d)
@@ -180,6 +346,63 @@ f32 gradient_noise(f32 x, f32 y)
 }
 
 /*
+    Simple Perlin Noise function
+ */
+f32 f_noise2f(f32 x, f32 y)
+{
+	f32 a, b, c, d;
+	int xi, yi;
+	x += 256.0;
+	xi = (int)x;
+	x -= (f32)xi;
+	y += 4096.0;
+	yi = (int)y;
+	y -= (f32)yi;
+	yi *= 11;
+	x = (3.0 * x * x - 2.0 * x * x * x);
+	y = (3.0 * y * y - 2.0 * y * y * y);
+
+	a = f_randnf((u32)xi + yi);
+	b = f_randnf((u32)xi + yi + 1);
+	c = a + (b - a) * x;
+
+	a = f_randnf((u32)xi + yi + 11);
+	b = f_randnf((u32)xi + yi + 12);
+	d = a + (b - a) * x;
+
+	return c + (d - c) * y;
+}
+
+/*
+    Tiled version for stuff that needs to be connected
+ */
+f32 f_noiset2f(f32 x, f32 y, i32 period)
+{
+	f32 a, b, c, d;
+	i32 xi, yi, xin, yin;
+	x += 256.0;
+	xi = (i32)x;
+	x -= (f32)xi;
+	y += 4096.0;
+	yi = (i32)y;
+	y -= (f32)yi;
+	x = (3.0 * x * x - 2.0 * x * x * x);
+	y = (3.0 * y * y - 2.0 * y * y * y);
+	xi = xi % period;
+	xin = (xi + 1) % period;
+	yin = ((yi + 1) % period) * 11;
+	yi = (yi % period) * 11;
+	a = f_randnf(xi + yi);
+	b = f_randnf(xin + yi);
+	c = a + (b - a) * x;
+	a = f_randnf(xi + yin);
+	b = f_randnf(xin + yin);
+	d = a + (b - a) * x;
+
+	return c + (d - c) * y;
+}
+
+/*
     Each pixel contains some color information
     consisting of three values: red, green and blue 
     and can also contain information about transparency with an
@@ -187,8 +410,9 @@ f32 gradient_noise(f32 x, f32 y)
  */
 inline void set_pixel(image_view_t const *img, i32 x, i32 y, color4_t color) 
 {
-    if (x >= 0 && x < (i32)img->width &&
-        y >= 0 && y < (i32)img->height) 
+    
+    if (Inside(x, 0, (i32)img->width) &&
+        Inside(y, 0, (i32)img->height)) 
     {
         BUF_AT(img, x, y) = color;
     }
@@ -198,8 +422,8 @@ inline color4_t get_pixel(image_view_t const *img, i32 x, i32 y)
 {
     color4_t color = {0, 0, 0, 0};
 
-    if (x >= 0 && x < (i32)img->width &&
-        y >= 0 && y < (i32)img->height) 
+    if (Inside(x, 0, (i32)img->width) &&
+        Inside(y, 0, (i32)img->height)) 
     {
         color =  BUF_AT(img, x, y);
     }
@@ -302,11 +526,12 @@ void clear_screen_radial_gradient(image_view_t const *color_buf,
     
     for (u32 y = 0; y < color_buf->height; ++y) 
     {
+        f32 dy = (f32)y - center_y;
+        f32 dy_2 =  dy * dy;
         for (u32 x = 0; x < color_buf->width; ++x) 
         {
             f32 dx = (f32)x - center_x;
-            f32 dy = (f32)y - center_y;
-            f32 dist_sq = dx * dx + dy * dy;
+            f32 dist_sq = dx * dx + dy_2;
             
             f32 t = Clamp(0.0f, dist_sq / max_dist_sq, 1.0f);
             
@@ -335,8 +560,7 @@ void draw_hline(image_view_t const *color_buf, i32 y, i32 x0, i32 x1, color4_t c
 
 void draw_vline(image_view_t const *color_buf, i32 x, i32 y0, i32 y1, color4_t const color)
 {
-    if(x < 0 || x >= (i32)color_buf->width)
-    {
+    if(x < 0 || x >= (i32)color_buf->width){
         return;
     }
 
@@ -352,6 +576,9 @@ void draw_vline(image_view_t const *color_buf, i32 x, i32 y0, i32 y1, color4_t c
     }
 }
 
+/*
+    Bresenham's line drawing algorithm
+ */
 void draw_line(image_view_t const *color_buf, i32 x0, i32 y0, i32 x1, i32 y1, color4_t const color)
 {
     bool steep = false;
@@ -511,7 +738,7 @@ void draw_rect_solid_wh(image_view_t const *color_buf, i32 x0, i32 y0, i32 w , i
 {
     if (w > 0) 
     {   
-        i32 j, x1 = x0 + w -1;
+        i32 j, x1 = x0 + w - 1;
         for (j=0; j < h; ++j)
         {
             draw_hline(color_buf, y0+j, x0, x1, color);
@@ -713,56 +940,52 @@ void draw_circle_aa(image_view_t *img, i32 cx, i32 cy, f32 radius, color4_t colo
     }
 }
 
-void draw_circle_filled_aa(image_view_t *img, i32 cx, i32 cy, f32 radius, color4_t color)
+void draw_circle_filled_aa(image_view_t *img,
+                           i32 cx, i32 cy,
+                           f32 radius,
+                           color4_t color)
 {
-    if (radius <= 0) return;
+    if (radius <= 0.0f) return;
 
-    f32 radiusX = radius;
-    f32 radiusY = radius;
-    f32 radiusX2 = radiusX * radiusX;
-    f32 radiusY2 = radiusY * radiusY;
-    
-    i32 quarter = (i32)roundf(radiusX2 / d_sqrt(radiusX2 + radiusY2));
-    for (i32 x = 0; x <= quarter; x++)
-    {
-        f32 y = radiusY * d_sqrt(1.0f - (f32)(x * x) / radiusX2);
-        f32 error = y - floorf(y);
-        
-        u8 transparency = (u8)(error * 255.0f);
-        u8 transparency2 = (u8)((1.0f - error) * 255.0f);
-        
-        i32 y_floor = (i32)floorf(y);
-        
-        draw_hline(img, cy + y_floor, cx - x, cx + x, color);
-        draw_hline(img, cy - y_floor, cx - x, cx + x, color);
-        
-        set_pixel_weighted(img, cx + x, cy + y_floor + 1, color, transparency);
-        set_pixel_weighted(img, cx - x, cy + y_floor + 1, color, transparency);
-        set_pixel_weighted(img, cx + x, cy - y_floor - 1, color, transparency);
-        set_pixel_weighted(img, cx - x, cy - y_floor - 1, color, transparency);
-    }
-    
-    quarter = (i32)roundf(radiusY2 / d_sqrt(radiusX2 + radiusY2));
+    f32 rsq = radius * radius;
 
-    for (i32 y = 0; y <= quarter; y++)
+    for (i32 yi = (i32)ceilf(-radius);
+         yi <= (i32)floorf(radius);
+         yi++)
     {
-        f32 x = radiusX * d_sqrt(1.0f - (f32)(y * y) / radiusY2);
-        f32 error = x - floorf(x);
-        
-        u8 transparency = (u8)(error * 255.0f);
-        u8 transparency2 = (u8)((1.0f - error) * 255.0f);
-        
-        i32 x_floor = (i32)floorf(x);
-        
-        draw_hline(img, cy + y, cx - x_floor, cx + x_floor, color);
-        draw_hline(img, cy - y, cx - x_floor, cx + x_floor, color);
-        
-        set_pixel_weighted(img, cx + x_floor + 1, cy + y, color, transparency);
-        set_pixel_weighted(img, cx - x_floor - 1, cy + y, color, transparency);
-        set_pixel_weighted(img, cx + x_floor + 1, cy - y, color, transparency);
-        set_pixel_weighted(img, cx - x_floor - 1, cy - y, color, transparency);
+        f32 fy = (f32)yi;
+        f32 x_real = d_sqrt(rsq - fy * fy);
+
+        i32 x_int = (i32)floorf(x_real);
+        f32 frac = x_real - (f32)x_int;
+
+        i32 y_screen = cy + yi;
+
+        draw_hline(img,
+                   y_screen,
+                   cx - x_int,
+                   cx + x_int,
+                   color);
+
+        u8 alpha = (u8)(frac * 255.0f);
+
+        if (alpha > 0)
+        {
+            set_pixel_weighted(img,
+                               cx + x_int + 1,
+                               y_screen,
+                               color,
+                               alpha);
+
+            set_pixel_weighted(img,
+                               cx - x_int - 1,
+                               y_screen,
+                               color,
+                               alpha);
+        }
     }
 }
+
 
 void draw_ellipse(image_view_t *img, i32 cx, i32 cy, i32 rx, i32 ry, color4_t color) 
 {
@@ -1221,9 +1444,21 @@ void draw_rounded_rectangle_filled_aa(image_view_t *img, i32 x1, i32 y1, i32 x2,
     draw_rect_solid(img, cx_left, cy_bottom + 1, cx_right, y2, color);
 }
 
+/*
+    to check whether a point lies inside a polygon 
+        - compare each side of the polygon to the Y (vertical) coordinate of the test point
+        - compile list of intersections and sort them in x-axis
+        - if there are an odd number of nodes on each side of the test point, then it is inside the polygon
+    Notes :
+        - if the polygon crosses itself it exhibits an exclusive or behaviour
+        - Points which are exactly on the Y threshold must be considered to belong to one side of the threshold.
+ */
 void draw_filled_polygon(image_view_t *img, const i32 *vx, const i32 *vy, i32 n, color4_t color)
 {
-    if (vx == NULL || vy == NULL || n < 3) {
+    if (vx == NULL ||
+        vy == NULL ||
+        n < 3) 
+    {
         return;
     }
 
@@ -1244,7 +1479,8 @@ void draw_filled_polygon(image_view_t *img, const i32 *vx, const i32 *vy, i32 n,
         i32 num_intersections = 0;
 
         // Find all intersections with this scanline
-        for (i32 i = 0; i < n; i++) {
+        for (i32 i = 0; i < n; i++) 
+        {
             i32 i1 = i;
             i32 i2 = (i + 1) % n;
             
@@ -1258,40 +1494,47 @@ void draw_filled_polygon(image_view_t *img, const i32 *vx, const i32 *vy, i32 n,
             
             // Ensure y1 < y2 for consistent processing
             i32 x1, x2;
-            if (y1 < y2) {
+            if (y1 < y2) 
+            {
                 x1 = vx[i1];
                 x2 = vx[i2];
-            } else {
-                // Swap so y1 < y2
-                i32 temp_y = y1;
-                y1 = y2;
-                y2 = temp_y;
+            } 
+            else 
+            {
+                SWAP(y1, y2, i32);
                 x1 = vx[i2];
                 x2 = vx[i1];
             }
             
             // Check if scanline intersects this edge
-            if (y >= y1 && y < y2) {
-                // Calculate intersection point using fixed-point math
-                i32 intersection = ((y - y1) * (x2 - x1) * 256) / (y2 - y1) + x1 * 256;
+            // vertex is only counted by the edge below it, not the edge above it.
+            // this amazingly solves alot of edge cases 
+            if (y >= y1 &&
+                y < y2) 
+            {
+                i32 intersection = EDGE_INTERSECT_FP(y, y1, y2, x1, x2);
                 intersections[num_intersections++] = intersection;
             }
         }
 
-        // Sort intersections left to right
-        for (i32 i = 0; i < num_intersections - 1; i++) {
-            for (i32 j = i + 1; j < num_intersections; j++) {
-                if (intersections[i] > intersections[j]) {
-                    i32 temp = intersections[i];
-                    intersections[i] = intersections[j];
-                    intersections[j] = temp;
+        for (i32 i = 0; i < num_intersections - 1; i++) 
+        {
+            for (i32 j = i + 1; j < num_intersections; j++) 
+            {
+                if (intersections[i] > intersections[j]) 
+                {
+                    SWAP(intersections[i], intersections[j], i32);
                 }
             }
         }
 
-        // Draw horizontal spans between pairs of intersections
-        for (i32 i = 0; i < num_intersections; i += 2) {
-            if (i + 1 < num_intersections) {
+        /* 
+            Skip through intersections in pairs to identify when inside the polygon
+         */
+        for (i32 i = 0; i < num_intersections; i += 2) 
+        {
+            if (i + 1 < num_intersections) 
+            {
                 i32 x_start = (intersections[i] + 255) >> 8;  // Round up
                 i32 x_end = (intersections[i + 1] - 1) >> 8;  // Round down
                 
@@ -1390,12 +1633,297 @@ void draw_thick_aaline(image_view_t *img , i32 x1, i32 y1, i32 x2, i32 y2, i32 w
     draw_aaline(img, px[1], py[1], px[2], py[2], color);  // bottom edge
 }
 
+#define MAX_POLY_CORNERS 256
+#define SPLINE    2.
+#define CUBIC     4.
+#define NEW_LOOP  3.
+#define END      -2.
+
+/*
+    F = (1.0 - t)^2 * p0.y + 2(1.0 - t) * t * p1.y + t^2 * p2.y
+    F = (1.0 - 2t + t^2) * p0.y + (2t - 2t^2) * p1.y + t^2 * p2.y 
+
+    t^2 [ p0.y - 2p1.y + p2.y ] +
+    t   [ 2(p1.y - p0.y) ] +
+    p0.y 
+
+    a = [ p0.y - 2p1.y + p2.y ]
+    b = [ 2(p1.y - p0.y) ]
+    c = p0.y
+
+    F = -b +- sqrt({b^2 - 4ac} \ 2a)
+ */
+
+void draw_spline_polygon_filled(image_view_t *img, double *poly, int IMAGE_LEFT, int IMAGE_RIGHT, int IMAGE_TOP, int IMAGE_BOT , color4_t color) 
+{
+    int nodes, nodeX[MAX_POLY_CORNERS], i, j, k, start, swap;
+    double Sx, Sy, Ex, Ey, p1x, p1y, sRoot, F, plusOrMinus, topPart, bottomPart, xPart;
+
+    for (int pixelY=IMAGE_TOP; pixelY<IMAGE_BOT; pixelY++) 
+    {
+        double Y = (double)pixelY + 0.000001;
+        nodes = 0;
+        i = 0;
+        start = 0;
+
+        while (poly[i] != END) 
+        {
+            j=i+2;
+            if (poly[i]==SPLINE) j++;
+            if (poly[i]==CUBIC)  j+=2;
+            if (poly[j]==END || poly[j]==NEW_LOOP) j=start;
+
+            if (poly[i]!=SPLINE && poly[i]!=CUBIC &&
+                poly[j]!=SPLINE && poly[j]!=CUBIC) 
+            {
+                //  STRAIGHT LINE
+                if ((poly[i+1]<Y && poly[j+1]>=Y) ||
+                    (poly[j+1]<Y && poly[i+1]>=Y)) 
+                {
+                    nodeX[nodes++]=(int)(poly[i]+(Y-poly[i+1])/(poly[j+1]-poly[i+1])*(poly[j]-poly[i]));
+                }
+            }
+            else if (poly[j]==SPLINE) 
+            {
+                //  QUADRATIC SPLINE
+                p1x=poly[j+1];
+                p1y=poly[j+2];
+                k=j+3;
+
+                if (poly[k]==END ||
+                    poly[k]==NEW_LOOP)
+                {
+                    k=start;
+                } 
+
+                if (poly[i]!=SPLINE) 
+                { 
+                    Sx=poly[i];
+                    Sy=poly[i+1]; 
+                }
+                else                 
+                { 
+                    Sx=(poly[i+1]+poly[j+1])/2.;
+                    Sy=(poly[i+2]+poly[j+2])/2.; 
+                }
+
+                if (poly[k]!=SPLINE) 
+                { 
+                    Ex=poly[k];
+                    Ey=poly[k+1]; 
+                }
+                else                 
+                {
+                    Ex=(poly[j+1]+poly[k+1])/2.0;
+                    Ey=(poly[j+2]+poly[k+2])/2.0; 
+                }
+
+                // 2a = 2 * [ p0.y - 2p1.y + p2.y ]
+                bottomPart=2.0*(Sy+Ey-p1y-p1y);
+
+                // zero denomenator in sqrt
+                if (bottomPart==0.0)
+                { 
+                    p1y+=.0001;
+                    bottomPart=-.0004; 
+                }
+
+                sRoot=2.0*(p1y-Sy);     // b = [ 2(p1.y - p0.y) ]
+                sRoot*=sRoot;           // b^2 
+                sRoot-=2.0*bottomPart*(Sy-Y); // -4ac
+
+                if (sRoot>=0.0) 
+                {
+                    sRoot=sqrt(sRoot);
+                    topPart=2.0*(Sy-p1y);
+                    // two solutions for plus and ,minus
+                    for (plusOrMinus=-1.0; plusOrMinus<1.1; plusOrMinus+=2.) 
+                    {
+                        F = (topPart+plusOrMinus*sRoot)/bottomPart;
+                        if (F>=0.0 && F<=1.0) 
+                        {
+                            xPart=Sx+F*(p1x-Sx);
+                            nodeX[nodes++]=(int)(xPart+F*(p1x+F*(Ex-p1x)-xPart));
+                        }
+                    }
+                }
+            }
+            else if (poly[j]==CUBIC) 
+            {
+                double p1x, p1y, p2x, p2y;
+
+                //  CUBIC SPLINE
+                p1x=poly[j+1]; p1y=poly[j+2];
+                p2x=poly[j+3]; p2y=poly[j+4];
+                k=j+5;
+                if (poly[k]==END || poly[k]==NEW_LOOP) k=start;
+
+                if (poly[i]!=SPLINE && poly[i]!=CUBIC) { Sx=poly[i];   Sy=poly[i+1]; }
+                else                                    { Sx=(poly[i+1]+p1x)/2.; Sy=(poly[i+2]+p1y)/2.; }
+                if (poly[k]!=SPLINE && poly[k]!=CUBIC) { Ex=poly[k];   Ey=poly[k+1]; }
+                else                                    { Ex=(p2x+poly[k+1])/2.; Ey=(p2y+poly[k+2])/2.; }
+
+                double ca = -Sy + 3*p1y - 3*p2y + Ey;
+                double cb =  3*Sy - 6*p1y + 3*p2y;
+                double cc = -3*Sy + 3*p1y;
+                double cd =  Sy - Y;
+
+                double guesses[3] = {0.1, 0.5, 0.9};
+                double roots[3];
+                int    num_roots=0;
+
+                for (int g=0; g<3; g++) 
+                {
+                    double t=guesses[g];
+                    for (int iter=0; iter<16; iter++) 
+                    {
+                        double ft  = ((ca*t + cb)*t + cc)*t + cd;
+                        double dft =  (3*ca*t + 2*cb)*t + cc;
+                        if (fabs(dft)<1e-10) break;
+                        t = t - ft/dft;
+                    }
+                    if (t<0. || t>1.) continue;
+                    if (fabs(((ca*t+cb)*t+cc)*t+cd)>1e-6) continue;
+                    int dup=0;
+                    for (int r=0; r<num_roots; r++) if (fabs(roots[r]-t)<1e-6) { dup=1; break; }
+                    if (!dup) roots[num_roots++]=t;
+                }
+
+                for (int r=0; r<num_roots; r++) {
+                    double t=roots[r], mt=1.-t;
+                    nodeX[nodes++]=(int)(mt*mt*mt*Sx + 3*mt*mt*t*p1x + 3*mt*t*t*p2x + t*t*t*Ex);
+                }
+            }
+
+            if (poly[i]==SPLINE) i++;
+            if (poly[i]==CUBIC)  i+=3;
+            i+=2;
+            if (poly[i]==NEW_LOOP) { i++; start=i; }
+        }
+
+        //  Sort nodes via bubble sort
+        i=0;
+        while (i<nodes-1) 
+        {
+            if (nodeX[i]>nodeX[i+1]) 
+            {
+                swap=nodeX[i];
+                nodeX[i]=nodeX[i+1];
+                nodeX[i+1]=swap;
+                if (i) i--;
+            } 
+            else 
+            {
+                i++;
+            }
+        }
+
+        //  Fill between node pairs
+        for (i=0; i<nodes; i+=2) 
+        {
+            if (nodeX[i]  >= IMAGE_RIGHT) 
+            {
+                break;
+            }
+            if (nodeX[i+1] > IMAGE_LEFT) 
+            {
+                if (nodeX[i] < IMAGE_LEFT)
+                {
+                    nodeX[i] = IMAGE_LEFT;
+                }
+                if (nodeX[i+1] > IMAGE_RIGHT)
+                {
+                    nodeX[i+1] = IMAGE_RIGHT;
+                }
+                for (int pixelX=nodeX[i]; pixelX<nodeX[i+1]; pixelX++) 
+                {
+                    draw_pixel(img, pixelX, pixelY, color);
+                }
+            }
+        }
+    }
+}
+
+void draw_path_filled(image_view_t *img, path_data_t *path, color4_t color)
+{
+    if (!path || arrlen(path->segments) == 0) return;
+
+    // Max size estimate: each cubic needs 5 doubles (CUBIC + 4 coords),
+    // each quad needs 3 (SPLINE + 2 coords), each line needs 2, plus NEW_LOOP and END
+    int max_poly_size = arrlen(path->segments) * 8 + 32;
+    double *poly = malloc(max_poly_size * sizeof(double));
+    if (!poly) return;
+
+    int pi = 0;
+    bool first_in_loop = true;
+    int loop_start = 0;
+
+    for (int i = 0; i < arrlen(path->segments); i++)
+    {
+        bezier_segment_t *seg = &path->segments[i];
+
+        // Detect start of new contour: degenerate moveto segment (p0==p2)
+        bool is_moveto = seg->is_linear &&
+                         seg->p0.x == seg->p2.x &&
+                         seg->p0.y == seg->p2.y;
+
+        if (is_moveto)
+        {
+            if (!first_in_loop && pi > 0)
+            {
+                poly[pi++] = NEW_LOOP;
+            }
+            loop_start = pi;
+            first_in_loop = false;
+
+            poly[pi++] = seg->p0.x;
+            poly[pi++] = seg->p0.y;
+            continue;
+        }
+
+        if (seg->is_linear)
+        {
+            // Straight line: just emit the endpoint
+            poly[pi++] = seg->p2.x;
+            poly[pi++] = seg->p2.y;
+        }
+        else if (!seg->is_cubic)
+        {
+            // Quadratic bezier
+            poly[pi++] = SPLINE;
+            poly[pi++] = seg->p1.x;
+            poly[pi++] = seg->p1.y;
+            poly[pi++] = seg->p2.x;
+            poly[pi++] = seg->p2.y;
+        }
+        else
+        {
+            // Cubic bezier
+            poly[pi++] = CUBIC;
+            poly[pi++] = seg->p1.x;
+            poly[pi++] = seg->p1.y;
+            poly[pi++] = seg->p2.x;
+            poly[pi++] = seg->p2.y;
+            poly[pi++] = seg->p3.x;
+            poly[pi++] = seg->p3.y;
+        }
+    }
+
+    poly[pi++] = END;
+
+    draw_spline_polygon_filled(img, poly,
+                   0, img->width,
+                   0, img->height, color);
+
+    free(poly);
+}
+
 void export_image(image_view_t const *color_buf, const char *filename) 
 {
     FILE *file = fopen(filename, "wb");
 
     if (!file) {
-        fprintf(stderr, "Error : Failed to open file to export image");
+        fprintf(stderr, "Error : Failed to open file to export image\n");
         return;
     }
 
@@ -1419,8 +1947,8 @@ void export_image(image_view_t const *color_buf, const char *filename)
 // check whether a point is inside a rectangle
 bool inside_rect(i32 x, i32 y, rect_t *s)
 {
-    bool check_x = (x >= s->x) && (x < (s->x + s->w));
-    bool check_y = (y >= s->y) && (y < (s->y + s->h));
+    bool check_x = Inside(x, s->x, (s->x + s->w));
+    bool check_y = Inside(y, s->y, (s->y + s->h));
     return (check_x && check_y);
 }
 
@@ -1433,7 +1961,8 @@ rect_t intersect_rects(const rect_t *a, const rect_t *b)
     i32 bottom = MIN(a->y+a->h, b->y+b->h);
     
     rect_t result = {0};
-    if (right > left && bottom > top) 
+    if (right > left &&
+        bottom > top) 
     {
         result.x = left;
         result.y = top;
@@ -1460,7 +1989,8 @@ void update_current_scissor(void)
     {
         if (scissor_stack[i].enabled) 
         {
-            rect_t current = (rect_t){scissor_stack[i].x,scissor_stack[i].y, scissor_stack[i].w, scissor_stack[i].h};
+            rect_t current = (rect_t){scissor_stack[i].x,scissor_stack[i].y,
+                                      scissor_stack[i].w, scissor_stack[i].h};
             if (!found_first) 
             {
                 effective = current;
@@ -1718,7 +2248,28 @@ void draw_radial_segment_filled(image_view_t *img,
     #undef MAX_VERTICES
 }
 
-void catmull_rom_point(f32 t, vertex_t p[4], vertex_t *out)
+
+/*
+   ​Given four points p0, p1, p2, p3 and t ∈ [0,1]
+
+   | −0.5     1.5    −1.5    0.5 |     | t^3 |
+   |  1.0    −2.5     2.0   −0.5 |     | t^2 |
+   | −0.5     0.0     0.5    0.0 |  .  | t   |
+   |  0.0     1.0     0.0    0.0 |     | 1   |
+
+    P(t)=0.5[(2p1​)
+            +(−p0​+p2​)t
+            +(2p0​−5p1​+4p2​−p3​)t^2
+            +(−p0​+3p1​−3p2​+p3​)t^3]
+
+    Produces C1 (no discontinuities in the tangent direction and magnitude) 
+    continuous cubic curve that Passes through all of the control points
+
+    Segments are define by two end control points p1 at t=0, p2 at t=1
+    plus an additional control point on either side of the endpoints.
+    Thus, to define S segments, S+3 control points are required.
+ */
+void catmull_rom_vertex(f32 t, vertex_t p[4], vertex_t *out)
 {
     f32 t2 = t * t;
     f32 t3 = t2 * t;
@@ -1735,3 +2286,428 @@ void catmull_rom_point(f32 t, vertex_t p[4], vertex_t *out)
     out->g = c0 * p[0].g + c1 * p[1].g + c2 * p[2].g + c3 * p[3].g;
     out->b = c0 * p[0].b + c1 * p[1].b + c2 * p[2].b + c3 * p[3].b;
 }
+
+/*
+    Another way to calculate it 
+ */
+f32 catmull_rom_1d_eval(f32 f, f32 p0, f32 p1, f32 p2, f32 p3)
+{
+    f32 inv = 1.0f - f;
+
+    f32 out;
+    out = ((p3 * f + p2 * inv) * f +(p2 * f + p1 * inv) * inv) * f +
+          ((p2 * f + p1 * inv) * f +(p1 * f + p0 * inv) * inv) * inv;
+    return out;
+}
+
+path_data_t * path_new(void)
+{
+    path_data_t *path = calloc(1, sizeof(path_data_t));
+    path->segments = NULL;
+    path->selected_segment = -1;
+    path->selected_point = -1;
+    path->is_dragging = false;
+    path->min_x = path->min_y =  1e9f;
+    path->max_x = path->max_y = -1e9f;
+    return path;
+}
+
+void add_bezier_segment(path_data_t *path, vec2f_t p0, vec2f_t p1, vec2f_t p2, vec2f_t p3, bool is_cubic, bool is_linear) 
+{
+    bezier_segment_t seg;
+    seg.p0 = p0;
+    seg.p1 = p1;
+    seg.p2 = p2;
+    seg.p3 = p3;
+    seg.is_cubic = is_cubic;
+    seg.is_linear = is_linear;
+
+    arrput(path->segments, seg);
+}
+
+/*
+    update bounding box
+ */
+#define UPDATE_BB(path, px, py) \
+    do { \
+        if ((px) < path->min_x) path->min_x = (px); \
+        if ((px) > path->max_x) path->max_x = (px); \
+        if ((py) < path->min_y) path->min_y = (py); \
+        if ((py) > path->max_y) path->max_y = (py); \
+    } while(0)
+
+/*
+    Reads every <path d="..."> element from a plain-text SVG.
+*/
+path_data_t *load_path_from_svg(const char *filename)
+{
+    unsigned char *buf = read_file(filename);   
+    if (!buf) return NULL;
+
+    path_data_t *path = path_new();         
+
+    char *file = (char*)buf;
+    char *search = file;
+
+    while ((search = strstr(search, "d=\"")) != NULL)
+    {
+        search += 3;                    
+        const char *end = strchr(search, '"');
+        if (!end) break;
+
+        /* copy path data into a null-terminated scratch buffer */
+        size_t len = (size_t)(end - search);
+        char  *file_path = malloc(len + 1);
+        if (!file_path) break;
+        memcpy(file_path, search, len);
+        file_path[len] = '\0';
+
+        /* --- interpret path commands ------------------------------ */
+        const char *p = file_path;
+        float cx = 0, cy = 0;           /* current pen position       */
+        float sx = 0, sy = 0;           /* start of current subpath   */
+        char  last_cmd = 0;
+
+        while (*p)
+        {
+            skip_whitespace_and_commas(&p);
+            if (!*p) break;
+
+            char cmd = *p;
+            int  is_alpha = isalpha((unsigned char)cmd);
+
+            if (is_alpha) { last_cmd = cmd; p++; }
+            else            cmd = last_cmd;     /* implicit repeat */
+
+            float x, y, x1, y1, x2, y2;
+
+            switch (cmd)
+            {
+                /* ---- moveto --------------------------------------- */
+                case 'M':
+                    if (!parse_two_floats(&p, &x, &y)) goto next_path;
+                    cx = x; cy = y; sx = cx; sy = cy;
+                    UPDATE_BB(path, cx, cy);
+                
+                    /* emit a degenerate moveto segment (p0 == p2) */
+                    add_bezier_segment(path,
+                        (vec2f_t){cx,cy}, (vec2f_t){cx,cy},
+                        (vec2f_t){cx,cy}, (vec2f_t){0,0},
+                        false, true);
+                    /* subsequent coords are implicit lineto */
+                    last_cmd = 'L';
+                    break;
+
+                case 'm':
+                    if (!parse_two_floats(&p, &x, &y)) goto next_path;
+                    cx += x; cy += y; sx = cx; sy = cy;
+                    UPDATE_BB(path, cx, cy);
+                    add_bezier_segment(path,
+                        (vec2f_t){cx,cy}, (vec2f_t){cx,cy},
+                        (vec2f_t){cx,cy}, (vec2f_t){0,0},
+                        false, true);
+                    last_cmd = 'l';
+                    break;
+
+                /* ---- lineto --------------------------------------- */
+                case 'L':
+                    if (!parse_two_floats(&p, &x, &y)) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        cx = x; cy = y;
+                        UPDATE_BB(path, cx, cy);
+                        vec2f_t p1 = {(p0.x+cx)/2.f, (p0.y+cy)/2.f};
+                        add_bezier_segment(path, p0, p1,
+                            (vec2f_t){cx,cy}, (vec2f_t){0,0}, false, true);
+                    }
+                    break;
+
+                case 'l':
+                    if (!parse_two_floats(&p, &x, &y)) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        cx += x; cy += y;
+                        UPDATE_BB(path, cx, cy);
+                        vec2f_t p1 = {(p0.x+cx)/2.f, (p0.y+cy)/2.f};
+                        add_bezier_segment(path, p0, p1,
+                            (vec2f_t){cx,cy}, (vec2f_t){0,0}, false, true);
+                    }
+                    break;
+
+                /* ---- horizontal / vertical lineto ----------------- */
+                case 'H':
+                    if (!parse_float(&p, &x)) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        cx = x;
+                        UPDATE_BB(path, cx, cy);
+                        vec2f_t p1 = {(p0.x+cx)/2.f, cy};
+                        add_bezier_segment(path, p0, p1,
+                            (vec2f_t){cx,cy}, (vec2f_t){0,0}, false, true);
+                    }
+                    break;
+
+                case 'h':
+                    if (!parse_float(&p, &x)) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        cx += x;
+                        UPDATE_BB(path, cx, cy);
+                        vec2f_t p1 = {(p0.x+cx)/2.f, cy};
+                        add_bezier_segment(path, p0, p1,
+                            (vec2f_t){cx,cy}, (vec2f_t){0,0}, false, true);
+                    }
+                    break;
+
+                case 'V':
+                    if (!parse_float(&p, &y)) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        cy = y;
+                        UPDATE_BB(path, cx, cy);
+                        vec2f_t p1 = {cx, (p0.y+cy)/2.f};
+                        add_bezier_segment(path, p0, p1,
+                            (vec2f_t){cx,cy}, (vec2f_t){0,0}, false, true);
+                    }
+                    break;
+
+                case 'v':
+                    if (!parse_float(&p, &y)) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        cy += y;
+                        UPDATE_BB(path, cx, cy);
+                        vec2f_t p1 = {cx, (p0.y+cy)/2.f};
+                        add_bezier_segment(path, p0, p1,
+                            (vec2f_t){cx,cy}, (vec2f_t){0,0}, false, true);
+                    }
+                    break;
+
+                /* ---- cubic bezier --------------------------------- */
+                case 'C':
+                    if (!parse_two_floats(&p, &x1, &y1)) goto next_path;
+                    if (!parse_two_floats(&p, &x2, &y2)) goto next_path;
+                    if (!parse_two_floats(&p, &x,  &y )) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        UPDATE_BB(path, x1,y1); UPDATE_BB(path, x2,y2); UPDATE_BB(path, x,y);
+                        cx = x; cy = y;
+                        add_bezier_segment(path, p0,
+                            (vec2f_t){x1,y1}, (vec2f_t){x2,y2},
+                            (vec2f_t){cx,cy}, true, false);
+                    }
+                    break;
+
+                case 'c':
+                    if (!parse_two_floats(&p, &x1, &y1)) goto next_path;
+                    if (!parse_two_floats(&p, &x2, &y2)) goto next_path;
+                    if (!parse_two_floats(&p, &x,  &y )) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        x1+=cx; y1+=cy; x2+=cx; y2+=cy; x+=cx; y+=cy;
+                        UPDATE_BB(path, x1,y1); UPDATE_BB(path, x2,y2); UPDATE_BB(path, x,y);
+                        cx = x; cy = y;
+                        add_bezier_segment(path, p0,
+                            (vec2f_t){x1,y1}, (vec2f_t){x2,y2},
+                            (vec2f_t){cx,cy}, true, false);
+                    }
+                    break;
+
+                /* ---- quadratic bezier ----------------------------- */
+                case 'Q':
+                    if (!parse_two_floats(&p, &x1, &y1)) goto next_path;
+                    if (!parse_two_floats(&p, &x,  &y )) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        UPDATE_BB(path, x1,y1); UPDATE_BB(path, x,y);
+                        cx = x; cy = y;
+                        add_bezier_segment(path, p0,
+                            (vec2f_t){x1,y1}, (vec2f_t){cx,cy},
+                            (vec2f_t){0,0}, false, false);
+                    }
+                    break;
+
+                case 'q':
+                    if (!parse_two_floats(&p, &x1, &y1)) goto next_path;
+                    if (!parse_two_floats(&p, &x,  &y )) goto next_path;
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        x1+=cx; y1+=cy; x+=cx; y+=cy;
+                        UPDATE_BB(path, x1,y1); UPDATE_BB(path, x,y);
+                        cx = x; cy = y;
+                        add_bezier_segment(path, p0,
+                            (vec2f_t){x1,y1}, (vec2f_t){cx,cy},
+                            (vec2f_t){0,0}, false, false);
+                    }
+                    break;
+
+                /* ---- closepath ------------------------------------ */
+                case 'Z':
+                case 'z':
+                    if (cx != sx || cy != sy)
+                    {
+                        vec2f_t p0 = {cx, cy};
+                        cx = sx; cy = sy;
+                        vec2f_t p1 = {(p0.x+cx)/2.f, (p0.y+cy)/2.f};
+                        add_bezier_segment(path, p0, p1,
+                            (vec2f_t){cx,cy}, (vec2f_t){0,0}, false, true);
+                    }
+                    last_cmd = 0;
+                    break;
+
+                default:
+                    p++; /* skip unknown character */
+                    break;
+            }
+        } /* while path commands */
+
+        next_path:
+        free(file_path);
+        search = end + 1;
+    }
+
+    free(buf);
+
+    if (arrlen(path->segments) == 0) {
+        printf("[SVG] No segments parsed from '%s'\n", filename);
+        arrfree(path->segments);
+        free(path);
+        return NULL;
+    }
+
+    /* SVG Y-axis is flipped vs. the path coordinate system used here.
+       Flip all Y coordinates so it renders upright with path_to_screen. */
+    float y_center = (path->min_y + path->max_y) / 2.0f;
+    for (int i = 0; i < arrlen(path->segments); i++)
+    {
+        bezier_segment_t *s = &path->segments[i];
+        s->p0.y = 2.f*y_center - s->p0.y;
+        s->p1.y = 2.f*y_center - s->p1.y;
+        s->p2.y = 2.f*y_center - s->p2.y;
+        s->p3.y = 2.f*y_center - s->p3.y;
+    }
+    /* bounding box stays the same after flip */
+
+    printf("[SVG] Loaded '%s': %d segments  BB:(%.1f,%.1f)-(%.1f,%.1f)\n",
+           filename,
+           arrlen(path->segments),
+           path->min_x, path->min_y,
+           path->max_x, path->max_y);
+
+    return path;
+}
+#undef UPDATE_BB
+
+
+f32 f_wigglef(f32 f, f32 size)
+{
+	float v0, v1, v2, v3;
+	u32 seed;
+	seed = (float)f;
+	f -= (float)seed;
+	seed *= 2;
+	size *= 2.0;
+	v0 = (f_randf(seed++) - 0.5) * size;
+	v1 = (f_randf(seed++) - 0.5) * size;
+	v3 = (f_randf(seed++) - 0.5) * size;
+	v2 = v3 * 2.0 - (f_randf(seed++) - 0.5) * size;
+	return catmull_rom_1d_eval(f, v0, v1, v2, v3);
+}
+
+image_view_t* load_texture(const char *filepath) 
+{
+    image_view_t *texture = malloc(sizeof(*texture));
+    assert(texture);
+    
+    int width, height, channels;
+    unsigned char *img_data = stbi_load(filepath, &width, &height, &channels, 4); // Force RGBA
+    
+    if (!img_data) {
+        fprintf(stderr, "Failed to load texture: %s\n", filepath);
+        free(texture);
+        return NULL;
+    }
+    
+    texture->width = (u32)width;
+    texture->height = (u32)height;
+    
+    texture->pixels = malloc(width * height * sizeof(color4_t));
+    assert(texture->pixels);
+    
+    for (int i = 0; i < width * height; i++) {
+        texture->pixels[i].r = img_data[i * 4 + 0];
+        texture->pixels[i].g = img_data[i * 4 + 1];
+        texture->pixels[i].b = img_data[i * 4 + 2];
+        texture->pixels[i].a = img_data[i * 4 + 3];
+    }
+    
+    stbi_image_free(img_data);
+    return texture;
+}
+
+void free_texture(image_view_t *texture) 
+{
+    if (texture) {
+        if (texture->pixels) {
+            free(texture->pixels);
+        }
+        free(texture);
+    }
+}
+
+void render_texture_to_buffer(image_view_t const *color_buf, image_view_t const *texture,  
+                               u32 dst_x, u32 dst_y, f32 scale, rect_t *out_rect) 
+{
+    u32 dst_w = texture->width * scale;
+    u32 dst_h = texture->height * scale;
+    
+    if (dst_x >= color_buf->width ||
+        dst_y >= color_buf->height) 
+    {
+        return;
+    }
+    
+    if ((i32)dst_x + (i32)dst_w <= 0 || 
+        (i32)dst_y + (i32)dst_h <= 0) 
+    {
+        return;
+    }
+    
+    u32 x_start = MAX(0, dst_x);
+    u32 y_start = MAX(0, dst_y);
+    u32 x_end = MIN(color_buf->width, dst_x + dst_w);
+    u32 y_end = MIN(color_buf->height, dst_y + dst_h);
+    
+    f32 x_scale = (f32)texture->width / dst_w;
+    f32 y_scale = (f32)texture->height / dst_h;
+
+    if(out_rect)
+    {
+        out_rect->x = x_start;
+        out_rect->y = y_start;
+        out_rect->w = x_end - x_start;
+        out_rect->h = y_end - y_start;
+    }
+
+    for (u32 y = y_start; y < y_end; y++) 
+    {
+        for (u32 x = x_start; x < x_end; x++) 
+        {
+            u32 rel_x = x - dst_x;
+            u32 rel_y = y - dst_y;
+            
+            u32 src_x = (u32)((f32)rel_x * x_scale);
+            u32 src_y = (u32)((f32)rel_y * y_scale);
+            
+            if (src_x < texture->width && src_y < texture->height) 
+            {
+                color4_t src_pixel = texture->pixels[src_y * texture->width + src_x];
+                
+                if (src_pixel.a > 0) { 
+                    BUF_AT(color_buf, x, y) = src_pixel;
+                }
+            }
+        }
+    }
+}
+

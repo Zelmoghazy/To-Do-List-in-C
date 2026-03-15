@@ -842,3 +842,189 @@ void free_font(font_tt *font)
     
     free(font);
 }
+#define UPDATE_BB(path, px, py) \
+    do { \
+        if ((px) < path->min_x) path->min_x = (px); \
+        if ((px) > path->max_x) path->max_x = (px); \
+        if ((py) < path->min_y) path->min_y = (py); \
+        if ((py) > path->max_y) path->max_y = (py); \
+    } while(0)
+
+path_data_t* load_glyph_curves(font_tt *font, const char *font_path, char character) 
+{
+    font->font_buffer  = read_file(font_path);
+    if(!font->font_buffer){
+        return NULL;
+    }
+
+    memset(&font->info, 0, sizeof(font->info));  
+    if (!stbtt_InitFont(&font->info, font->font_buffer, 0)) 
+    {
+        printf("Failed to init font\n");
+        free(font->font_buffer);
+        font->font_buffer = NULL;
+        return NULL;
+    }
+    
+    path_data_t *glyph = path_new();
+    int glyph_index = stbtt_FindGlyphIndex(&font->info, character);
+    if (glyph_index == 0) {
+        printf("Glyph not found for character '%c'\n", character);
+        free(glyph);
+        return NULL;
+    }
+    
+    /*
+        // The shape is a series of contours. Each one starts with
+        // a STBTT_moveto, then consists of a series of mixed
+        // STBTT_lineto and STBTT_curveto segments. A lineto
+        // draws a line from previous endpoint to its x,y; a curveto
+        // draws a quadratic bezier from previous endpoint to
+        // its x,y, using cx,cy as the bezier control point.
+    */
+    stbtt_vertex *vertices;
+    int num_vertices = stbtt_GetGlyphShape(&font->info, glyph_index, &vertices);
+    
+    if (num_vertices <= 0) {
+        printf("No vertices found\n");
+        free(glyph);
+        return NULL;
+    }
+    
+    glyph->min_x = glyph->min_y = 1e6;
+    glyph->max_x = glyph->max_y = -1e6;
+    
+    for (int i = 0; i < num_vertices; i++) 
+    {
+        float x = vertices[i].x;
+        float y = vertices[i].y;
+        UPDATE_BB(glyph, x, y);
+        
+        if (vertices[i].type == STBTT_vcurve) 
+        {
+            x = vertices[i].cx;
+            y = vertices[i].cy;
+            UPDATE_BB(glyph, x, y);
+        }
+        // For if OTF Font
+        else if (vertices[i].type == STBTT_vcubic) 
+        {
+            x = vertices[i].cx;
+            y = vertices[i].cy;
+            UPDATE_BB(glyph, x, y);
+            
+            x = vertices[i].cx1;
+            y = vertices[i].cy1;
+            UPDATE_BB(glyph, x, y);
+        }
+    }
+    
+    vec2f_t current_pos = {0, 0};
+    vec2f_t contour_start = {0, 0};
+    bool contour_open = false;
+
+    for (int i = 0; i < num_vertices; i++) 
+    {
+        stbtt_vertex *v = &vertices[i];
+        vec2f_t p0 = current_pos;
+        vec2f_t p_end = {v->x, v->y};
+        
+        switch (v->type) 
+        {
+            /*
+                Start a new contour
+             */
+            case STBTT_vmove:
+
+                /*
+                    if the contour is open and not at start close it
+                 */
+                if (contour_open &&
+                    (current_pos.x != contour_start.x ||
+                     current_pos.y != contour_start.y))
+                {
+                    /*
+                        Draw line to the start to close the loop
+                     */
+                    vec2f_t p1 = {(p0.x + p_end.x) / 2, (p0.y + p_end.y) / 2};
+                    add_bezier_segment(
+                        glyph,
+                        current_pos,
+                        p1,   // ignored
+                        contour_start,
+                        (vec2f_t){0,0},
+                        false,
+                        true               // linear
+                    );
+                }
+
+                /* 
+                    start a new contour
+                 */
+                current_pos = p_end;
+                contour_start = p_end;
+                contour_open = true;
+
+                add_bezier_segment(
+                    glyph,
+                    p_end,
+                    p_end,
+                    p_end,
+                    p_end,
+                    false,
+                    true
+                );
+                break;
+                
+            case STBTT_vline:
+                {
+                    vec2f_t p1 = {(p0.x + p_end.x) / 2, (p0.y + p_end.y) / 2};
+                    add_bezier_segment(glyph, p0, p1, p_end, (vec2f_t){0,0}, false, true);
+                    current_pos = p_end;
+                }
+                break;
+                
+            case STBTT_vcurve:
+                {
+                    vec2f_t cp  = {v->cx, v->cy};
+                    add_bezier_segment(glyph, p0, cp ,p_end,(vec2f_t){0,0}, false, false);
+                    current_pos = p_end;
+                }
+                break;
+                
+            case STBTT_vcubic:
+                {
+                    vec2f_t p1 = {v->cx, v->cy};
+                    vec2f_t p2 = {v->cx1, v->cy1};
+                    add_bezier_segment(glyph, p0, p1, p2, p_end, true, false);
+                    current_pos = p_end;
+                }
+                break;
+        }
+    }
+
+    if (contour_open &&
+        (current_pos.x != contour_start.x ||
+        current_pos.y != contour_start.y))
+    {
+        vec2f_t p1 = {(current_pos.x + contour_start.x) / 2, (current_pos.y + contour_start.y) / 2};
+
+        add_bezier_segment(
+            glyph,
+            current_pos,
+            p1,
+            contour_start,
+            (vec2f_t){0,0},
+            false,
+            true
+        );
+    }
+
+    stbtt_FreeShape(&font->info, vertices);
+    printf("Loaded glyph '%c': %d segments\n", character, arrlen(glyph->segments));
+    printf("Bounding box: (%.2f, %.2f) to (%.2f, %.2f)\n", 
+           glyph->min_x, glyph->min_y, glyph->max_x, glyph->max_y);
+    
+    return glyph;
+}
+#undef UPDATE_BB

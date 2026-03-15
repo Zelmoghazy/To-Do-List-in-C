@@ -74,6 +74,74 @@ void set_dark_mode(GLFWwindow *window)
     #endif
 }
 
+#ifdef _WIN32
+    static char s_result[MAX_PATH];
+
+    static void build_filter(char *buf, size_t bufsz,
+                            const char *desc, const char *pattern)
+    {
+        if (!desc)    desc    = "All Files";
+        if (!pattern) pattern = "*.*";
+
+        size_t d = strlen(desc);
+        size_t p = strlen(pattern);
+        if (d + p + 3 > bufsz) {
+            buf[0] = '\0';
+            buf[1] = '\0'; 
+            return; 
+        }
+        memcpy(buf, desc, d);
+        buf[d] = '\0';
+        memcpy(buf + d + 1, pattern, p);
+        buf[d + 1 + p]     = '\0';
+        buf[d + 1 + p + 1] = '\0';
+    }
+
+    static void init_ofn(OPENFILENAMEA *ofn, const char *title,
+                        char *filter, DWORD flags)
+    {
+        ZeroMemory(ofn, sizeof(*ofn));
+        ofn->lStructSize = sizeof(*ofn);
+        ofn->hwndOwner   = NULL;
+        ofn->lpstrFile   = s_result;
+        ofn->nMaxFile    = sizeof(s_result);
+        ofn->lpstrFilter = filter;
+        ofn->lpstrTitle  = title;
+        ofn->nFilterIndex = 1;
+        ofn->Flags       = flags;
+    }
+
+    /* file_dialog_open("Open File", "Image Files", "*.png;*.jpg;*.bmp");  */
+    const char *file_dialog_open(const char *title, const char *filter_desc,
+                                const char *filter_pattern)
+    {
+        OPENFILENAMEA ofn;
+        char filter[512];
+
+        build_filter(filter, sizeof(filter), filter_desc, filter_pattern);
+        s_result[0] = '\0';
+        init_ofn(&ofn, title, filter,
+                OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR);
+
+        return (GetOpenFileNameA(&ofn) == TRUE) ? s_result : NULL;
+    }
+
+    const char *file_dialog_save(const char *title, const char *filter_desc,
+                                const char *filter_pattern)
+    {
+        OPENFILENAMEA ofn;
+        char filter[512];
+
+        build_filter(filter, sizeof(filter), filter_desc, filter_pattern);
+        s_result[0] = '\0';
+        init_ofn(&ofn, title, filter,
+                OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_OVERWRITEPROMPT);
+
+        return (GetSaveFileNameA(&ofn) == TRUE) ? s_result : NULL;
+    }
+#endif
+
+
 void *create_window(u32 width, u32 height, const char *title)
 {
     if (!glfwInit()) {
@@ -127,7 +195,6 @@ void *create_window(u32 width, u32 height, const char *title)
 
     return window;
 }
-
 
 void init_framebuffer(void)
 {
@@ -255,7 +322,7 @@ void init_render_object(render_obj_t* obj, i32 max_vertices, char* vs, char* fs)
     char* vertexShaderSource   = read_shader_source(vs); 
     char* fragmentShaderSource = read_shader_source(fs); 
 
-    obj->shader_program = createShaderProgram(vertexShaderSource, fragmentShaderSource);
+    obj->shader_program = create_shader_program(vertexShaderSource, fragmentShaderSource);
     
     glGenVertexArrays(1, &obj->vao);
     glGenBuffers(1, &obj->vbo);
@@ -298,7 +365,7 @@ render_obj_t init_quad(char* vs, char* fs)
     render_obj_t rect;
     
     rect.vertex_count = NUM_ELEMS(vertices);
-    rect.shader_program = createShaderProgram(vertexShaderSource, fragmentShaderSource);
+    rect.shader_program = create_shader_program(vertexShaderSource, fragmentShaderSource);
     
     glGenVertexArrays(1, &rect.vao);
     glGenBuffers(1, &rect.vbo);
@@ -366,7 +433,7 @@ GLuint compile_shader(GLenum type, const char* source)
 }
 
 // Create a shader program from vertex and fragment shaders
-GLuint createShaderProgram(const char* vertexSource, const char* fragmentSource) 
+GLuint create_shader_program(const char* vertexSource, const char* fragmentSource) 
 {
     GLuint vertexShader = compile_shader(GL_VERTEX_SHADER, vertexSource);
     GLuint fragmentShader = compile_shader(GL_FRAGMENT_SHADER, fragmentSource);
@@ -392,33 +459,33 @@ GLuint createShaderProgram(const char* vertexSource, const char* fragmentSource)
     return shaderProgram;
 }
 
-void setBool(unsigned int ID, const char* name, int value) 
+void shader_set_bool(unsigned int ID, const char* name, int value) 
 {         
     glUniform1i(glGetUniformLocation(ID, name), value); 
 }
 
-void setInt(unsigned int ID, const char* name, int value) 
+void shader_set_int(unsigned int ID, const char* name, int value) 
 { 
     glUniform1i(glGetUniformLocation(ID, name), value); 
 }
 
-void setFloat(unsigned int ID, const char* name, float value)
+void shader_set_float(unsigned int ID, const char* name, float value)
 { 
     glUniform1f(glGetUniformLocation(ID, name), value); 
 }
 
-void setFloat2(unsigned int ID, const char* name, float value1, float value2)
+void shader_set_float_2(unsigned int ID, const char* name, float value1, float value2)
 { 
     glUniform2f(glGetUniformLocation(ID, name), value1, value2); 
 }
 
-void setVec3(unsigned int ID, const char* name, vec3f_t *vector) 
+void shader_set_vec3(unsigned int ID, const char* name, vec3f_t *vector) 
 {
     unsigned int loc = glGetUniformLocation(ID, name);
     glUniform3fv(loc, 1, vector);
 }
 
-void setMat4(unsigned int ID, const char* name, mat4x4_t *matrix) 
+void shader_set_mat4(unsigned int ID, const char* name, mat4x4_t *matrix) 
 {
     unsigned int loc = glGetUniformLocation(ID, name);
     glUniformMatrix4fv(loc, 1, GL_FALSE, matrix);
@@ -463,7 +530,7 @@ Texture* texture_create(const char* texturePath, const char* uniform)
 }
 
 Texture* texture_create_simple(const char* texturePath)
- {
+{
     Texture* texture = (Texture*)malloc(sizeof(Texture));
     if (!texture) {
         fprintf(stderr, "Failed to allocate memory for texture\n");

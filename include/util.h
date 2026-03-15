@@ -35,6 +35,7 @@
 
 #define M_PI                        3.14159265358979323846
 #define M_PI_2                      1.57079632679489661923
+#define TAU                         6.28318530717958647692
 
 #define ArrayCount(x)               ((sizeof(x))/(sizeof((x)[0])))
 
@@ -121,13 +122,13 @@ const char* enum_strings[] = {
 #define ABS(v)                          ((v < 0) ? -(unsigned)v : v)
 
 #define NEG(v,f)                        ((v ^ -f) + f)
-
 #define TOGGLE(B)                       ((B)^=1)
 
 #define KB(n)                           (((u64)(n)) << 10)
 #define MB(n)                           (((u64)(n)) << 20)
 #define GB(n)                           (((u64)(n)) << 30)
 #define TB(n)                           (((u64)(n)) << 40)
+
 #define Thousand(n)                     ((n)*1000)
 #define Million(n)                      ((n)*1000000)
 #define Billion(n)                      ((n)*1000000000)
@@ -151,6 +152,9 @@ const char* enum_strings[] = {
 #define MIN3_F64(a, b, c)               (MIN_F64(MIN_F64((a), (b)), (c)))
 
 #define CEIL_DIV(x, y)                  (((x) + (y) - 1) / (y))
+/* 
+    round x up to the nearest multiple of y
+ */
 #define ALIGN_UP(x, y)                  ((((x) + (y) - 1) / (y)) * (y))
 
 #define FPS(n)                          (1000/n)
@@ -158,6 +162,9 @@ const char* enum_strings[] = {
 #define MIDPOINT(start, end)            ((start) + ((end) - (start)) / 2)
 #define LEN_BETWEEN(start, end, include_end) \
     ((end) >= (start) ? (size_t)((end) - (start)) + ((include_end) ? 1 : 0) : 0)
+
+#define EDGE_INTERSECT_FP(y, y1, y2, x1, x2) \
+    ((((y) - (y1)) * ((x2) - (x1)) * 256) / ((y2) - (y1)) + (x1) * 256)
 
 #define RANGE_CONVERT(value, from_min, from_max, to_min, to_max) \
     (((value) - (from_min)) * ((to_max) - (to_min)) / ((from_max) - (from_min)) + (to_min))
@@ -169,10 +176,18 @@ const char* enum_strings[] = {
 #define IN_RANGE_WRAP(a,start,end)      (((end) < (start)) ? \
                                          ((a) >= (start) || (a) <= (end)) : \
                                          ((a) >= (start) && (a) <= (end)) )
-/* 
-    round n up to the nearest multiple of s
- */
-#define ALIGN(n,s)                      (((n) + (s) - 1)/((s)))*((s))
+
+#define RING_COPY_OUT(dst, ring, start, count, capacity, type)                 \
+    do {                                                                       \
+        size_t _first = (capacity) - (start);                                  \
+        if (_first >= (count)) {                                               \
+            memcpy((dst), &(ring)[(start)], (count) * sizeof(type));           \
+        } else {                                                               \
+            size_t _second = (count) - _first;                                 \
+            memcpy((dst), &(ring)[(start)], _first * sizeof(type));            \
+            memcpy((dst) + _first, (ring), _second * sizeof(type));            \
+        }                                                                      \
+    } while (0)
 
 #define FRAND_MAX                       32767  
 
@@ -193,11 +208,16 @@ const char* enum_strings[] = {
 */
 #define INVERSE_LERP(a, b, value)   (((value) - (a)) / ((b) - (a)))
 
+// Start from a base value and modify it using influences.
+#define WEIGHTED2(base, a, wa, b, wb) ((base) + (a)*(wa) + (b)*(wb))
+#define WEIGHTED3(base,a,wa,b,wb,c,wc) ((base)+(a)*(wa)+(b)*(wb)+(c)*(wc))
+
 #define ClampTop(A,X)               MIN(A,X)
 #define ClampBot(X,B)               MAX(X,B)
 #define Clamp(A,X,B)                (((X)<(A))?(A):((X)>(B))?(B):(X))
 
 #define Contains(x,min,max)         (min <= x && x <= max)
+#define Inside(x,min,max)           (min <= x && x < max)
 #define Surrounds(x,min,max)        (min < x && x < max)
 
 #define Compose64Bit(a,b)           ((((u64)a) << 32) | ((u64)b))
@@ -436,10 +456,15 @@ typedef struct
 typedef struct 
 {
     thread_handle_t* threads;      
-    job_t* jobs;                   
+
     mutex_handle_t queue_mutex;
-    cond_handle_t mutex_condition;
+
+    cond_handle_t work_available;
+    cond_handle_t idle_condition;
+
+    job_t* jobs;                   
     atomic_int_t active_jobs; 
+
     bool should_terminate;
 } thread_pool_t;
 
@@ -464,8 +489,13 @@ void log_color(char *text, char c);
 void log_error(i32 error_code, const char* file, i32 line);
 void *check_ptr (void *ptr, const char* file, i32 line);
 void dump_memory(void *ptr, i32 size);
+
 void fast_srand(u32 seed);
 i32 fast_rand(void);
+f32 f_randf(u32 index);
+i32 f_randi(u32 index);
+f32 f_randnf(u32 index);
+
 u32 hash(u32 x);
 u32 unhash(u32 x);
 u32 djb2_hash(const char *str);
@@ -560,13 +590,19 @@ thread_pool_t* threadpool_create(void);
 void threadpool_destroy(thread_pool_t* pool);
 void threadpool_queue_job(thread_pool_t* pool, job_func_t func, void* data);
 bool threadpool_busy(thread_pool_t* pool);
+void threadpool_wait(thread_pool_t* pool);
+
 int set_non_blocking(pipe_handle fd);
 int spawn_process(process_t *proc, const char *command);
 void check_process_output(process_t *proc);
 int check_process_status(process_t *proc);
 
-
 const char* get_file_extension(const char *filepath);
+unsigned char* read_file(const char* font_path);
+void skip_whitespace_and_commas(const char **p);
+int parse_float(const char **p, float *out);
+int parse_two_floats(const char **p, float *x, float *y);
+
 
 #define LOG_ERROR(error_code)   log_error(error_code, __FILE__, __LINE__)
 #define CHECK_PTR(ptr)          check_ptr(ptr, __FILE__, __LINE__)
