@@ -6,6 +6,8 @@ u32 scissor_stack_size;
 rect_t current_scissor;
 bool scissor_enabled;
 
+/* -------------------- Color stuff -------------------- */
+
 /*
     convert normalized color to 0->255 range
 */
@@ -44,7 +46,8 @@ color4_t linear_to_gamma(color4_t color)
 }
 
 /*
-    The definition uses two different functions – a straight line and an exponential curve – glued together at a certain “cutoff point”. The implication is that these functions (the ones in the sRGB to Linear definition) intersect at the point: (0.04045, 0.0031308)
+    The definition uses two different functions – a straight line and an exponential curve – glued together at a certain “cutoff point”.
+    The implication is that these functions (the ones in the sRGB to Linear definition) intersect at the point: (0.04045, 0.0031308)
     - condition : 0 ≤ S ≤ 0.0404482362771082 , value L = S/12.92
     - condition : 0.0404482362771082 < S ≤ 1, L = ((S+0.055)/1.055)^2.4
  */
@@ -322,85 +325,7 @@ color4_t rgb_from_wavelength(f64 wave)
     return color;
 }
 
-/* 
-    ---Interleaved Gradient Noise---
-
-    f32 noise = gradient_noise((f32)x, (f32)y);
-    vec3f_t noise_offset = {
-        (1.0f / 255.0f) * noise - (0.5f / 255.0f),
-        (1.0f / 255.0f) * noise - (0.5f / 255.0f),
-        (1.0f / 255.0f) * noise - (0.5f / 255.0f)
-    };
-    color = vec3f_add(color, noise_offset);
- */
-f32 gradient_noise(f32 x, f32 y) 
-{
-    const f32 magic_x = 0.06711056f;
-    const f32 magic_y = 0.00583715f;
-    const f32 magic_z = 52.9829189f;
-    
-    f32 dot_product = x * magic_x + y * magic_y;
-    f32 fract_dot = dot_product - floorf(dot_product);
-    f32 result = magic_z * fract_dot;
-    return result - floorf(result);
-}
-
-/*
-    Simple Perlin Noise function
- */
-f32 f_noise2f(f32 x, f32 y)
-{
-	f32 a, b, c, d;
-	int xi, yi;
-	x += 256.0;
-	xi = (int)x;
-	x -= (f32)xi;
-	y += 4096.0;
-	yi = (int)y;
-	y -= (f32)yi;
-	yi *= 11;
-	x = (3.0 * x * x - 2.0 * x * x * x);
-	y = (3.0 * y * y - 2.0 * y * y * y);
-
-	a = f_randnf((u32)xi + yi);
-	b = f_randnf((u32)xi + yi + 1);
-	c = a + (b - a) * x;
-
-	a = f_randnf((u32)xi + yi + 11);
-	b = f_randnf((u32)xi + yi + 12);
-	d = a + (b - a) * x;
-
-	return c + (d - c) * y;
-}
-
-/*
-    Tiled version for stuff that needs to be connected
- */
-f32 f_noiset2f(f32 x, f32 y, i32 period)
-{
-	f32 a, b, c, d;
-	i32 xi, yi, xin, yin;
-	x += 256.0;
-	xi = (i32)x;
-	x -= (f32)xi;
-	y += 4096.0;
-	yi = (i32)y;
-	y -= (f32)yi;
-	x = (3.0 * x * x - 2.0 * x * x * x);
-	y = (3.0 * y * y - 2.0 * y * y * y);
-	xi = xi % period;
-	xin = (xi + 1) % period;
-	yin = ((yi + 1) % period) * 11;
-	yi = (yi % period) * 11;
-	a = f_randnf(xi + yi);
-	b = f_randnf(xin + yi);
-	c = a + (b - a) * x;
-	a = f_randnf(xi + yin);
-	b = f_randnf(xin + yin);
-	d = a + (b - a) * x;
-
-	return c + (d - c) * y;
-}
+/* -------------------- Shapes stuff -------------------- */
 
 /*
     Each pixel contains some color information
@@ -1944,6 +1869,8 @@ void export_image(image_view_t const *color_buf, const char *filename)
     fclose(file);
 }
 
+/* -------------------- Scissor stuff -------------------- */
+
 // check whether a point is inside a rectangle
 bool inside_rect(i32 x, i32 y, rect_t *s)
 {
@@ -2129,6 +2056,8 @@ void clear_scissor_stack(void)
     scissor_enabled = false;
 }
 
+/* -------------------- Radial stuff -------------------- */
+
 void polar_to_cartesian(polar_t polar, f32 center_x, f32 center_y, 
                         f32 scale_x, f32 scale_y, f32 *out_x, f32 *out_y) 
 {
@@ -2248,6 +2177,7 @@ void draw_radial_segment_filled(image_view_t *img,
     #undef MAX_VERTICES
 }
 
+/* -------------------- Spline stuff -------------------- */
 
 /*
    ​Given four points p0, p1, p2, p3 and t ∈ [0,1]
@@ -2324,17 +2254,6 @@ void add_bezier_segment(path_data_t *path, vec2f_t p0, vec2f_t p1, vec2f_t p2, v
 
     arrput(path->segments, seg);
 }
-
-/*
-    update bounding box
- */
-#define UPDATE_BB(path, px, py) \
-    do { \
-        if ((px) < path->min_x) path->min_x = (px); \
-        if ((px) > path->max_x) path->max_x = (px); \
-        if ((py) < path->min_y) path->min_y = (py); \
-        if ((py) > path->max_y) path->max_y = (py); \
-    } while(0)
 
 /*
     Reads every <path d="..."> element from a plain-text SVG.
@@ -2596,8 +2515,328 @@ path_data_t *load_path_from_svg(const char *filename)
 
     return path;
 }
-#undef UPDATE_BB
 
+/* -------------------- Noise stuff -------------------- */
+
+/* 
+    ---Interleaved Gradient Noise---
+
+    f32 noise = gradient_noise((f32)x, (f32)y);
+    vec3f_t noise_offset = {
+        (1.0f / 255.0f) * noise - (0.5f / 255.0f),
+        (1.0f / 255.0f) * noise - (0.5f / 255.0f),
+        (1.0f / 255.0f) * noise - (0.5f / 255.0f)
+    };
+    color = vec3f_add(color, noise_offset);
+ */
+f32 gradient_noise(f32 x, f32 y) 
+{
+    const f32 magic_x = 0.06711056f;
+    const f32 magic_y = 0.00583715f;
+    const f32 magic_z = 52.9829189f;
+    
+    f32 dot_product = x * magic_x + y * magic_y;
+    f32 fract_dot = dot_product - floorf(dot_product);
+    f32 result = magic_z * fract_dot;
+    return result - floorf(result);
+}
+
+/*
+    Simple Perlin Noise function
+ */
+f32 f_noise2f(f32 x, f32 y)
+{
+	f32 a, b, c, d;
+	int xi, yi;
+	x += 256.0;
+	xi = (int)x;
+	x -= (f32)xi;
+	y += 4096.0;
+	yi = (int)y;
+	y -= (f32)yi;
+	yi *= 11;
+	x = (3.0 * x * x - 2.0 * x * x * x);
+	y = (3.0 * y * y - 2.0 * y * y * y);
+
+	a = f_randnf((u32)xi + yi);
+	b = f_randnf((u32)xi + yi + 1);
+	c = a + (b - a) * x;
+
+	a = f_randnf((u32)xi + yi + 11);
+	b = f_randnf((u32)xi + yi + 12);
+	d = a + (b - a) * x;
+
+	return c + (d - c) * y;
+}
+
+/*
+    Tiled version for stuff that needs to be connected
+ */
+f32 f_noiset2f(f32 x, f32 y, i32 period)
+{
+	f32 a, b, c, d;
+	i32 xi, yi, xin, yin;
+	x += 256.0;
+	xi = (i32)x;
+	x -= (f32)xi;
+	y += 4096.0;
+	yi = (i32)y;
+	y -= (f32)yi;
+	x = (3.0 * x * x - 2.0 * x * x * x);
+	y = (3.0 * y * y - 2.0 * y * y * y);
+	xi = xi % period;
+	xin = (xi + 1) % period;
+	yin = ((yi + 1) % period) * 11;
+	yi = (yi % period) * 11;
+	a = f_randnf(xi + yi);
+	b = f_randnf(xin + yi);
+	c = a + (b - a) * x;
+	a = f_randnf(xi + yin);
+	b = f_randnf(xin + yin);
+	d = a + (b - a) * x;
+
+	return c + (d - c) * y;
+}
+
+static int const noise_perm[512] = 
+{
+    151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,
+    190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,56,87,174,20,
+    125,136,171,168,68,175,74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,
+    105,92,41,55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,200,196,
+    135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,250,124,123,5,202,38,147,118,126,255,
+    82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,
+    153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,228,
+    251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,49,192,214,31,181,199,
+    106,157,184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,
+    78,66,215,61,156,180,
+    151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,
+    190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,56,87,174,20,
+    125,136,171,168,68,175,74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,
+    105,92,41,55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,200,196,
+    135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,250,124,123,5,202,38,147,118,126,255,
+    82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,
+    153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,228,
+    251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,49,192,214,31,181,199,
+    106,157,184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,
+    78,66,215,61,156,180
+};
+
+// Ken Perlin's improved fade curve
+// smoothstep quintic curve 6t⁵ - 15t⁴ + 10t³, gives C2-continuous output
+// if the second derivative of the smoothstep function has discontinuities 
+// which would lead to nasty artificats this supposedly fixes the problem
+static inline f32 noise_fade(f32 t) 
+{
+    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+}
+
+static inline f32 noise_grad2d(int hash, f32 x, f32 y) 
+{
+    int h = hash & 7;
+    f32 u = h < 4 ? x : y;
+    f32 v = h < 4 ? y : x;
+    return ((h & 1) ? -u : u) + ((h & 2) ? -2.0f * v : 2.0f * v);
+}
+
+static inline f32 noise_grad2d_simplex(int hash, f32 x, f32 y) 
+{
+    static f32 const grad2[][2] = {
+        {1.0f, 0.0f}, {-1.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, -1.0f},
+        { 0.7071067811865476f,  0.7071067811865476f},
+        {-0.7071067811865476f,  0.7071067811865476f},
+        { 0.7071067811865476f, -0.7071067811865476f},
+        {-0.7071067811865476f, -0.7071067811865476f}
+    };
+    int h = hash & 7;
+    return grad2[h][0] * x + grad2[h][1] * y;
+}
+
+static inline f32 noise_grad3d(int hash, f32 x, f32 y, f32 z) 
+{
+    int h = hash & 15;
+    f32 u = h < 8 ? x : y;
+    f32 v = h < 4 ? y : (h == 12 || h == 14 ? x : z);
+    return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
+}
+
+f32 perlin_2d(f32 x, f32 y, int seed) 
+{
+    x += seed * 12.9898f;
+    y += seed * 78.233f;
+
+    int X = (int)floorf(x) & 255;
+    int Y = (int)floorf(y) & 255;
+
+    x -= floorf(x);
+    y -= floorf(y);
+
+    f32 u = noise_fade(x);
+    f32 v = noise_fade(y);
+
+    int A = noise_perm[X]     + Y;
+    int B = noise_perm[X + 1] + Y;
+
+    f32 g00 = noise_grad2d(noise_perm[A],     x,        y);
+    f32 g10 = noise_grad2d(noise_perm[B],     x - 1.0f, y);
+    f32 g01 = noise_grad2d(noise_perm[A + 1], x,        y - 1.0f);
+    f32 g11 = noise_grad2d(noise_perm[B + 1], x - 1.0f, y - 1.0f);
+
+    return BILERP(g00, g10, g01, g11, u, v) * 0.5f;
+}
+
+
+f32 perlin_3d(f32 x, f32 y, f32 z, int seed) 
+{
+    x += seed * 12.9898f;
+    y += seed * 78.233f;
+    z += seed * 37.719f;
+
+    int X = (int)floorf(x) & 255;
+    int Y = (int)floorf(y) & 255;
+    int Z = (int)floorf(z) & 255;
+
+    x -= floorf(x);
+    y -= floorf(y);
+    z -= floorf(z);
+
+    f32 u = noise_fade(x);
+    f32 v = noise_fade(y);
+    f32 w = noise_fade(z);
+
+    int A  = noise_perm[X]     + Y;
+    int AA = noise_perm[A]     + Z;
+    int AB = noise_perm[A + 1] + Z;
+    int B  = noise_perm[X + 1] + Y;
+    int BA = noise_perm[B]     + Z;
+    int BB = noise_perm[B + 1] + Z;
+
+    f32 g000 = noise_grad3d(noise_perm[AA],     x,        y,        z);
+    f32 g100 = noise_grad3d(noise_perm[BA],     x - 1.0f, y,        z);
+    f32 g010 = noise_grad3d(noise_perm[AB],     x,        y - 1.0f, z);
+    f32 g110 = noise_grad3d(noise_perm[BB],     x - 1.0f, y - 1.0f, z);
+    f32 g001 = noise_grad3d(noise_perm[AA + 1], x,        y,        z - 1.0f);
+    f32 g101 = noise_grad3d(noise_perm[BA + 1], x - 1.0f, y,        z - 1.0f);
+    f32 g011 = noise_grad3d(noise_perm[AB + 1], x,        y - 1.0f, z - 1.0f);
+    f32 g111 = noise_grad3d(noise_perm[BB + 1], x - 1.0f, y - 1.0f, z - 1.0f);
+
+    return TRILERP(g000, g100, g010, g110, g001, g101, g011, g111, u, v, w) * 0.5f;
+}
+
+
+f32 simplex_2d(f32 x, f32 y, int seed) 
+{
+    static f32 const F2 = 0.366025403f;
+    static f32 const G2 = 0.211324865f;
+
+    x += seed * 12.9898f;
+    y += seed * 78.233f;
+
+    f32 s = (x + y) * F2;
+    int i = (int)floorf(x + s);
+    int j = (int)floorf(y + s);
+
+    f32 t  = (i + j) * G2;
+    f32 x0 = x - (i - t);
+    f32 y0 = y - (j - t);
+
+    int i1 = (x0 > y0) ? 1 : 0;
+    int j1 = (x0 > y0) ? 0 : 1;
+
+    f32 x1 = x0 - i1 + G2;
+    f32 y1 = y0 - j1 + G2;
+    f32 x2 = x0 - 1.0f + 2.0f * G2;
+    f32 y2 = y0 - 1.0f + 2.0f * G2;
+
+    int ii = i & 255;
+    int jj = j & 255;
+
+    f32 n0, n1, n2;
+
+    f32 t0 = 0.5f - x0 * x0 - y0 * y0;
+    if (t0 < 0.0f) { n0 = 0.0f; }
+    else { t0 *= t0; n0 = t0 * t0 * noise_grad2d_simplex(noise_perm[ii + noise_perm[jj]], x0, y0); }
+
+    f32 t1 = 0.5f - x1 * x1 - y1 * y1;
+    if (t1 < 0.0f) { n1 = 0.0f; }
+    else { t1 *= t1; n1 = t1 * t1 * noise_grad2d_simplex(noise_perm[ii + i1 + noise_perm[jj + j1]], x1, y1); }
+
+    f32 t2 = 0.5f - x2 * x2 - y2 * y2;
+    if (t2 < 0.0f) { n2 = 0.0f; }
+    else { t2 *= t2; n2 = t2 * t2 * noise_grad2d_simplex(noise_perm[ii + 1 + noise_perm[jj + 1]], x2, y2); }
+
+    return 45.23065f * (n0 + n1 + n2);
+}
+
+
+f32 worley_2d(f32 x, f32 y, int seed) 
+{
+    x += seed * 12.9898f;
+    y += seed * 78.233f;
+
+    int xi = (int)floorf(x);
+    int yi = (int)floorf(y);
+
+    f32 min_dist = 1e10f;
+
+    for (int dy = -1; dy <= 1; dy++) 
+    {
+        for (int dx = -1; dx <= 1; dx++) 
+        {
+            int cx = xi + dx;
+            int cy = yi + dy;
+
+            int h  = noise_perm[(cx & 255) + noise_perm[(cy & 255)]];
+            f32 px = (f32)cx + (noise_perm[h] / 255.0f);
+            f32 py = (f32)cy + (noise_perm[(h + 1) & 255] / 255.0f);
+
+            f32 ddx  = x - px;
+            f32 ddy  = y - py;
+            f32 dist = sqrtf(ddx * ddx + ddy * ddy);
+
+            if (dist < min_dist) min_dist = dist;
+        }
+    }
+
+    return min_dist * 1.4f - 1.0f;
+}
+
+f32 vhash(int px, int py, int seed)
+{
+    int _perm1 = (px + seed) & 255; 
+    int _perm2 = (noise_perm[_perm1] + py) & 255; 
+    int _perm3 = noise_perm[_perm2];
+
+    return RANGE_CONVERT((f32)_perm3, \
+                  0.0f, 255.0f, \
+                  -1.0f, 1.0f);
+}
+
+f32 value_noise_2d(f32 x, f32 y, int seed) 
+{
+    int xi = (int)floorf(x);
+    int yi = (int)floorf(y);
+
+    f32 xf = x - (f32)xi;
+    f32 yf = y - (f32)yi;
+
+    xi = xi & 255;
+    yi = yi & 255;
+
+    f32 u = noise_fade(xf);
+    f32 v = noise_fade(yf);
+
+    // hash the corners and use lerp to get values between
+    f32 n00 = vhash(xi,     yi    , seed);
+    f32 n10 = vhash(xi + 1, yi    , seed);
+    f32 n01 = vhash(xi,     yi + 1, seed);
+    f32 n11 = vhash(xi + 1, yi + 1, seed);
+
+    // billinear interpolation
+    return BILERP(n00, n10, n01, n11, u, v);
+}
+
+/* -------------------- Motion stuff -------------------- */
 
 f32 f_wigglef(f32 f, f32 size)
 {
@@ -2613,6 +2852,100 @@ f32 f_wigglef(f32 f, f32 size)
 	v2 = v3 * 2.0 - (f_randf(seed++) - 0.5) * size;
 	return catmull_rom_1d_eval(f, v0, v1, v2, v3);
 }
+
+// Simulates a damped spring system settling from 0 to 1.
+// Parameters:
+//   u    - time input [0, inf)
+//   mass - mass of the spring (clamped to 1 if <= 0)
+//   k    - stiffness (higher = faster oscillation)
+//   c    - damping coefficient
+//   v0   - initial velocity
+// Returns a value that starts at 0 and settles toward 1.
+// Behavior depends on the damping ratio (zeta):
+//   zeta < 1 : underdamped  — overshoots and oscillates before settling
+//   zeta = 1 : critically damped — fastest settle with no overshoot
+//   zeta > 1 : overdamped   — slow creep to 1, no oscillation
+static inline f32 spring_unit(f32 u, f32 mass, f32 k, f32 c, f32 v0) 
+{
+    f32 m    = (mass <= 0.0f ? 1.0f : mass);
+    f32 wn   = sqrtf(k / m);
+    f32 zeta = c / (2.0f * sqrtf(k * m));
+    f32 t    = u;
+
+    if (zeta < 1.0f) {
+        // Underdamped: oscillates around 1 with decaying amplitude
+        f32 wdn = wn * sqrtf(1.0f - zeta * zeta);
+        f32 A   = 1.0f;
+        f32 B   = (zeta * wn * A + v0) / wdn;
+        f32 e   = expf(-zeta * wn * t);
+        return 1.0f - e * (A * cosf(wdn * t) + B * sinf(wdn * t));
+    } else if (zeta == 1.0f) {
+        // Critically damped: settles fastest without overshooting
+        f32 e = expf(-wn * t);
+        return 1.0f - e * (1.0f + wn * t);
+    } else {
+        // Overdamped: two decaying exponentials, sluggish approach to 1
+        f32 wd = wn * sqrtf(zeta * zeta - 1.0f);
+        f32 e1 = expf(-(zeta * wn - wd) * t);
+        f32 e2 = expf(-(zeta * wn + wd) * t);
+        return 1.0f - 0.5f * (e1 + e2);
+    }
+}
+
+typedef enum {
+    WAVE_SINE     = 0,
+    WAVE_TRIANGLE = 1,
+    WAVE_SAWTOOTH = 2,
+    WAVE_SQUARE   = 3,
+} wave_type_t;
+
+// Evaluates a single period of a waveform at normalized time t.
+// t is wrapped to [0, 1) so any value is valid input.
+// All wave types output in [-1, 1].
+//   SINE      — smooth sinusoidal
+//   TRIANGLE  — linear ramp up then down, pointy peaks
+//   SAWTOOTH  — linear ramp from -1 to 1, hard reset
+//   SQUARE    — instant flip between +1 and -1 at midpoint
+static inline f32 eval_wave(wave_type_t wave_type, f32 t) 
+{
+    t = t - floorf(t); // wrap to [0, 1)
+    switch (wave_type) {
+        case WAVE_SINE:
+            return sinf(t * 2.0f * M_PI);
+        case WAVE_TRIANGLE:
+            return (t < 0.5f) ? (4.0f * t - 1.0f) : (3.0f - 4.0f * t);
+        case WAVE_SAWTOOTH:
+            return 2.0f * t - 1.0f;
+        case WAVE_SQUARE:
+            return (t < 0.5f) ? 1.0f : -1.0f;
+        default:
+            return sinf(t * 2.0f * M_PI);
+    }
+}
+
+typedef struct {
+    f32 time;
+    u32 last_frame;
+} osc_state_t;
+
+//   state     - persistent oscillator state owned by the caller
+//   amplitude - peak output value, output range is [-amplitude, amplitude]
+//   frequency - cycles per second
+//   wave_type - shape of the waveform (see wave_type_t)
+//   phase     - time offset in [0, 1], shifts the wave without touching state
+//   dt        - delta time in seconds for this frame
+f32 oscillate(osc_state_t* state, f32 amplitude, f32 frequency,
+              wave_type_t wave_type, f32 phase, f32 dt, u32 current_frame) 
+{
+    if (state->last_frame != current_frame) {
+        state->time      += dt;
+        state->last_frame = current_frame;
+    }
+    f32 t = state->time * frequency + phase;
+    return amplitude * eval_wave(wave_type, t);
+}
+
+/* -------------------- Texture stuff -------------------- */
 
 image_view_t* load_texture(const char *filepath) 
 {
@@ -2710,4 +3043,3 @@ void render_texture_to_buffer(image_view_t const *color_buf, image_view_t const 
         }
     }
 }
-

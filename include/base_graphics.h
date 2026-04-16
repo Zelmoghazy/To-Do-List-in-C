@@ -134,6 +134,25 @@ typedef struct
     (vec2f_t){(1.0f-t)*(1.0f-t)*(1.0f-t)*p0.x + 3*(1.0f-t)*(1.0f-t)*t*p1.x + 3*(1.0f-t)*t*t*p2.x + t*t*t*p3.x, \
               (1.0f-t)*(1.0f-t)*(1.0f-t)*p0.y + 3*(1.0f-t)*(1.0f-t)*t*p1.y + 3*(1.0f-t)*t*t*p2.y + t*t*t*p3.y} 
 
+#define QUAD_BEZIER_DERIV(p0, p1, p2, t)\
+    (vec2f_t){(2.0f*(1.0f-t)*(p1.x-p0.x) + 2.0f*t*(p2.x-p1.x)), \
+              (2.0f*(1.0f-t)*(p1.y-p0.y) + 2.0f*t*(p2.y-p1.y))}
+
+#define CUBIC_BEZIER_DERIV(p0, p1, p2, p3, t)\
+    (vec2f_t){(3.0f*(1.0f-t)*(1.0f-t)*(p1.x-p0.x) + 6.0f*(1.0f-t)*t*(p2.x-p1.x) + 3.0f*t*t*(p3.x-p2.x)), \
+              (3.0f*(1.0f-t)*(1.0f-t)*(p1.y-p0.y) + 6.0f*(1.0f-t)*t*(p2.y-p1.y) + 3.0f*t*t*(p3.y-p2.y))}
+
+/*
+    update bounding box
+ */
+#define UPDATE_BB(bb, px, py) \
+    do { \
+        if ((px) < bb->min_x) bb->min_x = (px); \
+        if ((px) > bb->max_x) bb->max_x = (px); \
+        if ((py) < bb->min_y) bb->min_y = (py); \
+        if ((py) > bb->max_y) bb->max_y = (py); \
+    } while(0)
+
 extern scissor_region_t scissor_stack[MAX_SCISSOR_STACK];
 extern u32 scissor_stack_size;
 extern rect_t current_scissor;

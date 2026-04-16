@@ -255,6 +255,8 @@ struct context_t
     i32                 mouse_last_x;
     i32                 mouse_y;
     i32                 mouse_last_y;
+    i32                 delta_x;
+    i32                 delta_y;
     bool                first_mouse;
     bool                left_button_down;
     bool                right_button_down;
@@ -915,8 +917,6 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
     (void)delta_x;
     (void)delta_y;
 
-    ui_block_t *target = ui_block_at_point(ctx, (i32)gc.mouse_x, (i32)gc.mouse_y);
-
     // block interaction not inside the modal block when active
     if (ctx->modal_active && ctx->modal_block) 
     {
@@ -924,7 +924,10 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
             return;
         }
     }
-        
+
+    ui_block_t *target = ui_block_at_point(ctx, (i32)gc.mouse_x, (i32)gc.mouse_y);
+
+    /* Hovered */    
     if(target && target->visible)
     {
         ctx->hot_block_id = target->id;
@@ -933,17 +936,12 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
         if(!target->hover)
         {
             target->hover = true;
+            // start hot animation
             if(!animation_get(target->id, &target->hot_anim_t)){
                 animation_start((u64)target->id, 0.0f, 1.0f, 0.2f, EASE_IN_OUT_CUBIC);
             }
+            ui_block_save_state(target);
         }
-
-        // do custom update if required
-        if(target->custom_update)
-        {
-            target->custom_update(target);
-        }
-        ui_block_save_state(target);
 
         glfwSetCursor(gc.window, gc.hand_cursor);
     }
@@ -951,6 +949,26 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
     {
         glfwSetCursor(gc.window, gc.regular_cursor);
         ctx->hot_block_id = 0;
+    }
+
+    // update active block even if its not hovered
+    if(ctx->active_block_id)
+    {
+        ui_block_t *active = ui_block_find_by_id(ctx, ctx->active_block_id);
+        if(active && active->custom_update)
+        {
+            active->custom_update(active);
+            ui_block_save_state(active);
+        }
+    }
+    else if (target && target->visible)
+    {
+        // do custom update if required
+        if(target->custom_update)
+        {
+            target->custom_update(target);
+            ui_block_save_state(target);
+        }
     }
 }
 
@@ -1091,13 +1109,21 @@ void ui_handle_mouse_button(ui_context_t *ctx)
             if(ctx->active_block_id == target->id)
             {
                 target->released = true;
-                printf("Block : %s released\n", target->title);
                 if (target->toggleable) {
                     target->toggled = !target->toggled;
                 }
+                printf("Block : %s released\n", target->title);
             }
             else
             {
+                ui_block_t *active = ui_block_find_by_id(ctx, ctx->active_block_id);
+                if (active)
+                {
+                    active->clicked  = false;
+                    active->dragging = false;
+                    active->released = false;
+                    ui_block_save_state(active);
+                }
                 target->released  = false;
             }
 
@@ -1121,9 +1147,19 @@ void ui_handle_mouse_button(ui_context_t *ctx)
     }
     else
     {
-        ctx->active_block_id = 0;
+        if (!gc.left_button_down && ctx->active_block_id)
+        {
+            ui_block_t *active = ui_block_find_by_id(ctx, ctx->active_block_id);
+            if (active)
+            {
+                active->clicked  = false;
+                active->dragging = false;
+                active->released = false;
+                ui_block_save_state(active);
+            }
+            ctx->active_block_id = 0;
+        }
     }
-
 }
 
 void ui_handle_scroll(ui_context_t *ctx, f32 scroll_x, f32 scroll_y)
@@ -2049,16 +2085,40 @@ void ui_render_slider(ui_block_t *block)
         handle_size
     };
 
-    if(inside_rect(gc.mouse_x, gc.mouse_y, &handle))
+    static f32 glow_scale = 1.0f;
+    static bool was_hovered = false;
+
+    bool hovered      = inside_rect(gc.mouse_x, gc.mouse_y, &handle);
+    bool just_entered = hovered && !was_hovered;
+
+    if(hovered)
     {
-        handle_color =  HEX_TO_COLOR4(0x3149c7);
+        handle_color = HEX_TO_COLOR4(0x3149c7);
+
+        if(just_entered)
+            animation_start((u64)&handle, 1.0f, 1.5f, 0.2f, EASE_IN_OUT_CUBIC);
+
+        animation_get((u64)&handle, &glow_scale);
+    }
+    else
+    {
+        glow_scale  = 1.0f;
+        was_hovered = false;
     }
 
+    was_hovered = hovered;
+
+    float scale = WEIGHTED2(1.0f,
+                            block->hot_anim_t, 0.5f,         // grows a bit when hovered
+                            block->active_anim_t, -0.1f);    // shrinks a bit when pressed.
+
+
     draw_circle_filled_aa(&gc.draw_buffer, block->abs_x + handle_x, block->abs_y + handle_y,
-                         handle_size/2.0, handle_color);
+                         handle_size*scale/2.0, handle_color);
+    draw_circle_aa(&gc.draw_buffer, block->abs_x + handle_x, block->abs_y + handle_y,
+                         handle_size*scale*glow_scale/2.0, handle_color);
     // draw_rounded_rect_scissored(&gc.draw_buffer, handle_x, handle_y, handle_size, handle_size*2, 25, handle_color);
 
-    
     if (block->text.string) {
         // render_text_in_block(block);
     }
@@ -2101,6 +2161,16 @@ f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
 
     slider->custom_render = ui_render_slider;
     slider->custom_update = ui_update_slider;
+
+    if(!animation_get(slider->id, &slider->hot_anim_t))
+    {
+        slider->hot_anim_t = slider->hover;
+    }
+
+    if(!animation_get(slider->id+1, &slider->active_anim_t))
+    {
+        slider->active_anim_t = slider->clicked;
+    }
 
     ui_add_child(ctx, slider);
 
@@ -3605,9 +3675,9 @@ void render_all(void)
     ui_new_frame(gc.ui_ctx);
 
     PROFILE("Main screen"){
-        // render_layout_test_screen();
-        render_interactive_texture();
-        render_floating_panel_test();
+        render_layout_test_screen();
+        // render_interactive_texture();
+        // render_floating_panel_test();
         // render_todo_screen();
     }
 

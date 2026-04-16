@@ -202,6 +202,14 @@ const char* enum_strings[] = {
 #define LERP_F32(start, end, t)         ((f32)((start) + ((end) - (start)) * (t)))
 #define LERP_F64(start, end, t)         ((f64)((start) + ((end) - (start)) * (t)))
 
+#define BILERP(n00, n10, n01, n11, u, v) \
+    (LERP_F32(LERP_F32((n00), (n10), (u)), \
+              LERP_F32((n01), (n11), (u)), (v)))
+
+#define TRILERP(n000, n100, n010, n110, n001, n101, n011, n111, u, v, w) \
+    (LERP_F32(BILERP((n000), (n100), (n010), (n110), (u), (v)), \
+              BILERP((n001), (n101), (n011), (n111), (u), (v)), (w)))
+
 /*
     value = LERP(a, b, t)
     t = INVERSE_LERP(a, b, value) 
@@ -440,10 +448,44 @@ typedef struct {
     bool        done;
 }animation_t;
 
+typedef struct {
+    animation_t steps[8];  // fixed max chain length
+    i32  step_count;
+    i32  current_step;
+    u64  chain_id;               // unique ID for the chain itself
+} anim_chain_t;
+
+#define ANIM_RANK_MAX_MEMBERS 16
+#define ANIM_RANK_MAX         32
+
+typedef struct {
+    u64 rank_id;
+    u64 member_ids[ANIM_RANK_MAX_MEMBERS];
+    i32 member_count;
+} anim_rank_t;
+
+#define POLY_MORPH_MAX_VERTS 32
+typedef struct {
+    u64         id_base; 
+    i32         count;   
+    i32         start_x[POLY_MORPH_MAX_VERTS];
+    i32         start_y[POLY_MORPH_MAX_VERTS];
+    i32         target_x[POLY_MORPH_MAX_VERTS];
+    i32         target_y[POLY_MORPH_MAX_VERTS];
+    i32         duration;
+    easing_type easing;
+} poly_morph_t;
+
 #define ANIMATION_MAX_ITEMS 32
 
 extern animation_t animation_items[ANIMATION_MAX_ITEMS];
 extern i32 animation_item_count;
+
+extern anim_chain_t anim_chains[32];
+extern i32 anim_chain_count;
+
+anim_rank_t anim_ranks[ANIM_RANK_MAX];
+i32         anim_rank_count;
 
 typedef void (*job_func_t)(void* data);
 
@@ -565,6 +607,21 @@ void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type ea
 void animation_update(f64 dt);
 bool animation_get(u64 id, f32 *current);
 void animation_pingpong(u64 id, f32 start, f32 target, f32 duration, easing_type easing);
+void animation_chain_update(void);
+void animation_rank_start(u64 id, animation_t *members, i32 member_count);
+void animation_rank_stop(u64 id);
+bool animation_rank_get(u64 id, f32 *out_values, i32 out_count);
+void animation_rank_update(void);
+
+
+void morph_start(poly_morph_t *m,
+                 int *src_x, int *src_y, int n,
+                 int *dst_x, int *dst_y, int dst_count,
+                 f32 duration, easing_type easing);
+
+bool morph_sample(poly_morph_t *m, f32 *out_x, f32 *out_y);
+
+void morph_stop(poly_morph_t *m);
 
 f64 get_time_difference(void *last_time);
 void get_time(void *time);
@@ -593,9 +650,9 @@ bool threadpool_busy(thread_pool_t* pool);
 void threadpool_wait(thread_pool_t* pool);
 
 int set_non_blocking(pipe_handle fd);
-int spawn_process(process_t *proc, const char *command);
-void check_process_output(process_t *proc);
-int check_process_status(process_t *proc);
+int spawn_process_async(process_t *proc, const char *command);
+void check_process_output_async(process_t *proc);
+int check_process_status_async(process_t *proc);
 
 const char* get_file_extension(const char *filepath);
 unsigned char* read_file(const char* font_path);

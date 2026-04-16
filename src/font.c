@@ -842,13 +842,6 @@ void free_font(font_tt *font)
     
     free(font);
 }
-#define UPDATE_BB(path, px, py) \
-    do { \
-        if ((px) < path->min_x) path->min_x = (px); \
-        if ((px) > path->max_x) path->max_x = (px); \
-        if ((py) < path->min_y) path->min_y = (py); \
-        if ((py) > path->max_y) path->max_y = (py); \
-    } while(0)
 
 path_data_t* load_glyph_curves(font_tt *font, const char *font_path, char character) 
 {
@@ -1027,4 +1020,3 @@ path_data_t* load_glyph_curves(font_tt *font, const char *font_path, char charac
     
     return glyph;
 }
-#undef UPDATE_BB

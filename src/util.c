@@ -182,6 +182,7 @@ u64 arith_mod(u64 x, u64 y)
         return x % y;
 }
 
+// Hermite interpolation f(t)=3t²-2t³
 static inline f32 smoothstep(f32 edge0, f32 edge1, f32 x) 
 {
     f32 t = Clamp(0.0f, (x - edge0) / (edge1 - edge0), 1.0f);
@@ -253,6 +254,22 @@ f32 cosine_deg(i32 x)
     return sine_deg(90-x);
 }
 
+void resample(int* arr, int n, int m, int* out) 
+{
+    if (m == 1) { out[0] = arr[0]; return; }
+
+    for (int i = 0; i < m; i++) {
+        if (i == 0)     { out[i] = arr[0];     continue; }
+        if (i == m - 1) { out[i] = arr[n - 1]; continue; }
+
+        double src_pos = (double)i * (n - 1) / (m - 1);
+        int left       = (int)src_pos;
+        int right      = left + 1 < n ? left + 1 : n - 1;
+        double t       = src_pos - left;
+
+        out[i] = (int)round(arr[left] * (1.0 - t) + arr[right] * t);
+    }
+}
 /* -------------------- Math stuff -------------------- */
 
 vec2f_t vec2f(f32 x, f32 y)
@@ -1200,6 +1217,9 @@ void quat_slerp(quat_t *quat1, quat_t *quat2, float slerp, quat_t *result)
 animation_t animation_items[ANIMATION_MAX_ITEMS];
 i32 animation_item_count;
 
+anim_chain_t anim_chains[32];
+i32 anim_chain_count;
+
 /* https://easings.net/ */
 f64 apply_easing(f64 t, easing_type easing) 
 {
@@ -1222,7 +1242,10 @@ f64 apply_easing(f64 t, easing_type easing)
             return t * t * t;
             
         case EASE_OUT_CUBIC:
-            return (--t) * t * t + 1.0;
+        {
+            f64 u = t - 1.0;
+            return u * u * u + 1.0;
+        }
             
         case EASE_IN_OUT_CUBIC:
             if (t < 0.5) return 4.0 * t * t * t;
@@ -1238,18 +1261,30 @@ f64 apply_easing(f64 t, easing_type easing)
             return -0.5 * ((f64)cosf(M_PI * t) - 1.0);
 
         case EASE_OUT_BOUNCE:
+        {
             const f64 n1 = 7.5625;
             const f64 d1 = 2.75;
-
-            if (t < 1.0 / d1) {
+ 
+            if (t < 1.0 / d1)
+            {
                 return n1 * t * t;
-            } else if (t < 2.0 / d1) {
-                return n1 * (t -= 1.5 / d1) * t + 0.75;
-            } else if (t < 2.5 / d1) {
-                return n1 * (t -= 2.25 / d1) * t + 0.9375;
-            } else {
-                return n1 * (t -= 2.625 / d1) * t + 0.984375;
             }
+            else if (t < 2.0 / d1)
+            {
+                f64 u = t - 1.5 / d1;
+                return n1 * u * u + 0.75;
+            }
+            else if (t < 2.5 / d1)
+            {
+                f64 u = t - 2.25 / d1;
+                return n1 * u * u + 0.9375;
+            }
+            else
+            {
+                f64 u = t - 2.625 / d1;
+                return n1 * u * u + 0.984375;
+            }
+        }
         default:
             return t;
     }
@@ -1260,12 +1295,16 @@ void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type ea
     for (i32 i = 0; i < animation_item_count; i++) 
     {
         animation_t *it = &animation_items[i];
-        if (it->id == id) {
-            // it->elapsed = 0;      
-            it->start = it->current;
+
+        // there already exists an animation 
+        if (it->id == id) 
+        {
+            it->start = it->current;        // should continue from where it is ?
             it->target = target;
             it->elapsed = 0;
             it->duration = duration;
+            it->easing = easing;
+            it->done = false;
             return;
         }
     }
@@ -1273,15 +1312,29 @@ void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type ea
     // push new item if we have room
     if (animation_item_count < ANIMATION_MAX_ITEMS) 
     {
-        animation_items[animation_item_count++] = (animation_t){
+        animation_items[animation_item_count++] = (animation_t)
+        {
             .id = id,
             .start = start,
+            .current = start,
             .target = target,
             .easing = easing,
             .duration = duration,
             .elapsed = 0,
             .done = false
         };
+    }
+}
+
+void animation_stop(u64 id)
+{
+    for (i32 i = 0; i < animation_item_count; i++)
+    {
+        if (animation_items[i].id == id)
+        {
+            animation_items[i] = animation_items[--animation_item_count];
+            return;
+        }
     }
 }
 
@@ -1293,6 +1346,7 @@ void animation_update(f64 dt)
         
         anim->elapsed += dt;
         
+        // exceed the duration
         if (anim->elapsed >= anim->duration) 
         {
             anim->done = true;
@@ -1310,6 +1364,9 @@ void animation_update(f64 dt)
         
         anim->current = LERP_F32(anim->start, anim->target, eased_t);
     }
+
+    animation_chain_update();
+    animation_rank_update();
 }
 
 bool animation_get(u64 id, f32 *current)
@@ -1326,6 +1383,7 @@ bool animation_get(u64 id, f32 *current)
     return false;
 }
 
+/* TODO remove static vars it doesnt work with diff ids simulataneously */
 void animation_pingpong(u64 id, f32 start, f32 target, f32 duration, easing_type easing)
 {
     static bool reached_top = false;
@@ -1349,6 +1407,193 @@ void animation_pingpong(u64 id, f32 start, f32 target, f32 duration, easing_type
         animation_start((u64)&current ,begin, end, duration, easing);
         reached_top = false;
         reached_bottom = true;
+    }
+}
+
+void animation_chain_start(u64 id, f32 start, 
+                      animation_t *steps, i32 step_count)
+{
+    if (step_count <= 0) return;
+
+    anim_chain_t *chain = NULL;
+    for (i32 i = 0; i < anim_chain_count; i++) {
+        if (anim_chains[i].chain_id == id) {
+            chain = &anim_chains[i];
+            break;
+        }
+    }
+    if (!chain && anim_chain_count < 32) {
+        chain = &anim_chains[anim_chain_count++];
+    }
+    if (!chain) return;
+
+    chain->chain_id     = id;
+    chain->step_count   = step_count;
+    chain->current_step = 0;
+    memcpy(chain->steps, steps, step_count * sizeof(animation_t));
+
+    animation_start(id, start, steps[0].target, steps[0].duration, steps[0].easing);
+
+}
+
+void animation_chain_update(void)
+{
+    for (i32 i = anim_chain_count - 1; i >= 0; i--)
+    {
+        anim_chain_t *chain = &anim_chains[i];
+ 
+        bool last_step     = (chain->current_step >= chain->step_count - 1);
+
+        f32 current = 0;
+        bool step_running = animation_get(chain->chain_id, &current);
+ 
+        // the chain is completed remove it 
+        if (last_step && !step_running)
+        {
+            anim_chains[i] = anim_chains[--anim_chain_count];
+            continue;
+        }
+ 
+        if (!last_step && !step_running)
+        {
+            /* Advance to the next step. */
+            f32 current = 0;
+            animation_get(chain->chain_id, &current);  
+
+            chain->current_step++;
+            animation_t *next = &chain->steps[chain->current_step];
+            animation_start(chain->chain_id, current, next->target, next->duration, next->easing);
+        }
+    }
+}
+
+void animation_rank_start(u64 id, animation_t *members, i32 member_count)
+{
+    if (member_count <= 0 || member_count > ANIM_RANK_MAX_MEMBERS) return;
+
+    anim_rank_t *rank = NULL;
+    for (i32 i = 0; i < anim_rank_count; i++) 
+    {
+        if (anim_ranks[i].rank_id == id) {
+            rank = &anim_ranks[i];
+            break;
+        }
+    }
+    if (!rank && anim_rank_count < ANIM_RANK_MAX) {
+        rank = &anim_ranks[anim_rank_count++];
+    }
+    if (!rank) return;
+
+    rank->rank_id      = id;
+    rank->member_count = member_count;
+
+    for (i32 i = 0; i < member_count; i++) 
+    {
+        u64 mid = (id ^ (u64)0xDEAD0000) + (u64)i;
+        rank->member_ids[i] = mid;
+
+        animation_t *m = &members[i];
+        animation_start(mid, m->start, m->target, m->duration, m->easing);
+    }
+}
+
+void animation_rank_stop(u64 id)
+{
+    for (i32 i = 0; i < anim_rank_count; i++) {
+        anim_rank_t *rank = &anim_ranks[i];
+        if (rank->rank_id != id) continue;
+
+        for (i32 j = 0; j < rank->member_count; j++)
+            animation_stop(rank->member_ids[j]);
+
+        anim_ranks[i] = anim_ranks[--anim_rank_count];
+        return;
+    }
+}
+
+/* Fills out_values[member_count] with each member's current value.
+   Returns true while at least one member is still running. */
+bool animation_rank_get(u64 id, f32 *out_values, i32 out_count)
+{
+    for (i32 i = 0; i < anim_rank_count; i++) {
+        anim_rank_t *rank = &anim_ranks[i];
+        if (rank->rank_id != id) continue;
+
+        i32 n = MIN(out_count, rank->member_count);
+        for (i32 j = 0; j < n; j++)
+            animation_get(rank->member_ids[j], &out_values[j]);
+
+        return true;
+    }
+    return false;
+}
+
+void animation_rank_update(void)
+{
+    for (i32 i = anim_rank_count - 1; i >= 0; i--) {
+        anim_rank_t *rank = &anim_ranks[i];
+
+        bool any_running = false;
+        f32  dummy       = 0;
+        for (i32 j = 0; j < rank->member_count; j++) {
+            if (animation_get(rank->member_ids[j], &dummy)) {
+                any_running = true;
+                break;
+            }
+        }
+
+        if (!any_running)
+            anim_ranks[i] = anim_ranks[--anim_rank_count];
+    }
+}
+
+#define MORPH_ID_X(m, i)  ((m)->id_base + (u64)(i))
+#define MORPH_ID_Y(m, i)  ((m)->id_base + POLY_MORPH_MAX_VERTS + (u64)(i))
+
+void morph_start(poly_morph_t *m,
+                 int *src_x, int *src_y, int n,
+                 int *dst_x, int *dst_y, int dst_count,
+                 f32 duration, easing_type easing)
+{
+    m->count    = dst_count;
+    m->duration = duration;
+    m->easing   = easing;
+
+    // naive resamplin works ok for now for general n to m vert morph
+    resample(src_x, n, dst_count, m->start_x);
+    resample(src_y, n, dst_count, m->start_y);   // was the bug: src_x used twice
+
+    for (int i = 0; i < dst_count; i++) {
+        m->target_x[i] = (f32)dst_x[i];
+        m->target_y[i] = (f32)dst_y[i];
+    }
+
+    for (int i = 0; i < dst_count; i++) {
+        animation_start(MORPH_ID_X(m, i), m->start_x[i], m->target_x[i], duration, easing);
+        animation_start(MORPH_ID_Y(m, i), m->start_y[i], m->target_y[i], duration, easing);
+    }
+}
+
+bool morph_sample(poly_morph_t *m, f32 *out_x, f32 *out_y)
+{
+    if (m->count <= 0) return false;
+
+    bool any_live = animation_get(MORPH_ID_X(m, 0), &out_x[0]);
+    if (!any_live) return false;
+
+    for (int i = 0; i < m->count; i++) {
+        bool ok_x = animation_get(MORPH_ID_X(m, i), &out_x[i]);
+        bool ok_y = animation_get(MORPH_ID_Y(m, i), &out_y[i]);
+        if (!ok_x || !ok_y) return false;
+    }
+    return true;
+}
+
+void morph_stop(poly_morph_t *m)
+{
+    for (int i = 0; i < m->count; i++) {
+        animation_stop(MORPH_ID_X(m, i));
+        animation_stop(MORPH_ID_Y(m, i));
     }
 }
 
@@ -1387,8 +1632,75 @@ void get_time(void *time)
     #endif
 }
 
+static inline u64 tsc_now(void) 
+{
+    return __rdtsc();
+}
+
+static inline u64 tsc_get_difference(u64 *last_tsc) 
+{
+    u64 now = __rdtsc();
+    u64 delta = now - *last_tsc;
+    *last_tsc = now;
+    return delta;  
+}
+
+static inline f64 tsc_to_seconds(u64 ticks, u64 tsc_freq) 
+{
+    return (f64)ticks / (f64)tsc_freq;
+}
+
+/*
+    - Time of a CPU cycle = 1 / CPUFreq
+    - Time of an OS tick  = 1 / OSFreq
+
+    During the same time period T
+    - T = CPU cycles elapsed * Time of a CPU cycle
+    - T = OS Ticks elapsed * Time of an OS tick
+
+    therefore : 
+    CPU cycles elapsed / CPUFreq = OS Ticks elapsed / OSFreq
+
+    CPUFreq = (CPU cycles * OSFreq) / OS Ticks
+*/
+u64 tsc_calibrate(void) 
+{
+#ifdef _WIN32
+    LARGE_INTEGER wall;
+    QueryPerformanceCounter(&wall);
+    u64 tsc0 = __rdtsc();
+
+    // spin ~10ms
+    LARGE_INTEGER freq, now;
+    QueryPerformanceFrequency(&freq);
+    do { QueryPerformanceCounter(&now); }
+    while ((f64)(now.QuadPart - wall.QuadPart) / (f64)freq.QuadPart < 0.01);
+
+    u64 tsc1 = __rdtsc();
+    f64 elapsed = (f64)(now.QuadPart - wall.QuadPart) / (f64)freq.QuadPart;
+#else
+    struct timespec wall;
+    clock_gettime(CLOCK_MONOTONIC, &wall);
+    u64 tsc0 = __rdtsc();
+
+    // spin ~10ms
+    struct timespec now;
+    f64 elapsed = 0.0;
+    do {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        elapsed = (now.tv_sec - wall.tv_sec) +
+                  (now.tv_nsec - wall.tv_nsec) / 1e9;
+    } while (elapsed < 0.01);
+
+    u64 tsc1 = __rdtsc();
+#endif
+    return (u64)((tsc1 - tsc0) / elapsed);
+}
 /* -------------------- File stuff -------------------- */
 
+/*
+    NOTE: hidden files in linux start with '.'
+ */
 const char* get_file_extension(const char *filepath)
 {
     const char* dot = strrchr(filepath, '.');
@@ -1429,6 +1741,155 @@ unsigned char* read_file(const char* font_path)
     return buffer;
 }
 
+#define PATH_MAX_LEN 4096
+
+int get_executable_path(char *out, size_t size)
+{
+#ifdef _WIN32
+    DWORD len = GetModuleFileNameA(NULL, out, (DWORD)size);
+    return (len > 0 && len < size) ? 0 : -1;
+
+#elif defined(__APPLE__)
+    uint32_t sz = (uint32_t)size;
+    return (_NSGetExecutablePath(out, &sz) == 0) ? 0 : -1;
+
+#else
+    ssize_t len = readlink("/proc/self/exe", out, size - 1);
+    if (len <= 0) return -1;
+    out[len] = '\0';
+    return 0;
+#endif
+}
+
+int get_executable_dir(char *out, size_t size)
+{
+    char tmp[PATH_MAX_LEN];
+    if (get_executable_path(tmp, sizeof(tmp)) != 0) return -1;
+
+    char *last_sep = strrchr(tmp,
+#ifdef _WIN32
+        '\\'
+#else
+        '/'
+#endif
+    );
+
+    if (!last_sep) return -1;
+    *last_sep = '\0';
+
+    if (strlen(tmp) >= size) return -1;
+    strncpy(out, tmp, size - 1);
+    out[size - 1] = '\0';
+    return 0;
+}
+
+int get_parent_path(const char *path, int levels, char *out, size_t size)
+{
+    if (!path || levels < 0) return -1;
+
+    strncpy(out, path, size - 1);
+    out[size - 1] = '\0';
+
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+
+    for (int i = 0; i < levels; i++)
+    {
+        char *last_sep = strrchr(out, sep);
+        if (!last_sep || last_sep == out) break;
+        *last_sep = '\0';
+    }
+
+    return 0;
+}
+
+int path_join(const char *base, const char *child, char *out, size_t size)
+{
+    if (!base || !child) return -1;
+
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+
+    size_t base_len = strlen(base);
+
+    // strip trailing sep from base
+    while (base_len > 1 && base[base_len - 1] == sep)
+        base_len--;
+
+    // skip leading sep from child
+    while (*child == sep)
+        child++;
+
+    int written = snprintf(out, size, "%.*s%c%s",
+                           (int)base_len, base, sep, child);
+
+    return (written > 0 && (size_t)written < size) ? 0 : -1;
+}
+
+int get_cwd(char *out, size_t size)
+{
+#ifdef _WIN32
+    return GetCurrentDirectoryA((DWORD)size, out) != 0 ? 0 : -1;
+#else
+    return getcwd(out, size) != NULL ? 0 : -1;
+#endif
+}
+
+const char *path_filename(const char *path)
+{
+    if (!path) return NULL;
+
+    const char *fwd = strrchr(path, '/');
+    const char *bck = strrchr(path, '\\');
+
+    const char *last = fwd > bck ? fwd : bck;
+    return last ? last + 1 : path;
+}
+
+const char *path_extension(const char *path)
+{
+    const char *filename = path_filename(path);
+    if (!filename) return NULL;
+
+    const char *dot = strrchr(filename, '.');
+
+    // dot at start means hidden file (.bashrc), not an extension
+    return (dot && dot != filename) ? dot : NULL;
+}
+
+typedef enum {
+    PATH_NOT_FOUND = 0,
+    PATH_IS_FILE   = 1,
+    PATH_IS_DIR    = 2,
+} path_kind_t;
+
+path_kind_t path_kind(const char *path)
+{
+    if (!path) return PATH_NOT_FOUND;
+
+#ifdef _WIN32
+    DWORD attrs = GetFileAttributesA(path);
+    if (attrs == INVALID_FILE_ATTRIBUTES) return PATH_NOT_FOUND;
+    return (attrs & FILE_ATTRIBUTE_DIRECTORY) ? PATH_IS_DIR : PATH_IS_FILE;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0) return PATH_NOT_FOUND;
+    if (S_ISDIR(st.st_mode))  return PATH_IS_DIR;
+    if (S_ISREG(st.st_mode))  return PATH_IS_FILE;
+    return PATH_NOT_FOUND;
+#endif
+}
+
+#define PATH_EXISTS(path)   (path_kind(path) == 0)
+
+/*  */
+
 void skip_whitespace_and_commas(const char **p)
 {
     while (**p && (isspace((unsigned char)**p) || **p == ','))
@@ -1448,6 +1909,181 @@ int parse_float(const char **p, float *out)
 int parse_two_floats(const char **p, float *x, float *y)
 {
     return parse_float(p, x) && parse_float(p, y);
+}
+
+/*  */
+
+#if defined(_MSC_VER) || defined(_WIN32)
+#include <string.h>
+
+    const char *strcasestr(const char *haystack, const char *needle)
+    {
+        if (!haystack || !needle)
+            return NULL;
+
+        if (!*needle)
+            return haystack;
+
+        char first = tolower((unsigned char)*needle);
+
+        for (; *haystack; ++haystack) {
+            if (tolower((unsigned char)*haystack) == first) {
+                const char *h = haystack;
+                const char *n = needle;
+
+                while (*h && *n) {
+                    if (tolower((unsigned char)*h) != tolower((unsigned char)*n))
+                        break;
+                    ++h;
+                    ++n;
+                }
+
+                if (!*n)
+                    return haystack;
+            }
+        }
+
+        return NULL;
+    }
+
+#endif
+
+static i32 compute_score(i32 jump, bool first_char, const char *match);
+
+static i32 fuzzy_match_recurse(const char *pattern, const char *str,
+                                   i32 score, bool first_char);
+
+/*
+ * Returns score if each character in pattern is found sequentially within str.
+ * Returns INT32_MIN otherwise.
+ */
+i32 fuzzy_match(const char *pattern, const char *str) 
+{
+    const int unmatched_letter_penalty = -1;
+    const size_t slen = strlen(str);
+    const size_t plen = strlen(pattern);
+    i32 score = 100;
+
+    if (*pattern == '\0') {
+        return score;
+    }
+    if (slen < plen) {
+        return INT32_MIN;
+    }
+
+    /* We can already penalise any unused letters. */
+    score += unmatched_letter_penalty * (i32) (slen - plen);
+
+    /* Perform the match. */
+    score = fuzzy_match_recurse(pattern, str, score, true);
+
+    return score;
+}
+
+/*
+ * Recursively match the whole of pattern against str.
+ * The score parameter is the score of the previously matched character.
+ *
+ * This reaches a maximum recursion depth of strlen(pattern) + 1. However, the
+ * stack usage is small (the maximum I've seen on x86_64 is 144 bytes with
+ * gcc -O3), so this shouldn't matter unless pattern contains thousands of
+ * characters.
+ */
+i32 fuzzy_match_recurse(const char *pattern, const char *str, 
+                            i32 score, bool first_char) 
+{
+    if (*pattern == '\0') {
+        /* We've matched the full pattern. */
+        return score;
+    }
+
+    const char *match = str;
+    const char search[2] = {*pattern, '\0'};
+
+    i32 best_score = INT32_MIN;
+
+    /*
+     * Find all occurrences of the next pattern character in str, and
+     * recurse on them.
+     */
+    while ((match = strcasestr(match, search)) != NULL) 
+    {
+        i32 subscore = fuzzy_match_recurse(pattern + 1, match + 1, 
+                                               compute_score(match - str, first_char, match), false);
+        best_score = MAX(best_score, subscore);
+        match++;
+    }
+
+    if (best_score == INT32_MIN) 
+    {
+        /* We couldn't match the rest of the pattern. */
+        return INT32_MIN;
+    } 
+    else 
+    {
+        return score + best_score;
+    }
+}
+
+/*
+ * Calculate the score for a single matching letter.
+ * The scoring system is taken from fts_fuzzy_match v0.2.0 by Forrest Smith,
+ * which is licensed to the public domain.
+ *
+ * The factors affecting score are:
+ *   - Bonuses:
+ *     - If there are multiple adjacent matches.
+ *     - If a match occurs after a separator character.
+ *     - If a match is uppercase, and the previous character is lowercase.
+ *
+ *   - Penalties:
+ *     - If there are letters before the first match.
+ *     - If there are superfluous characters in str (already accounted for).
+ */
+i32 compute_score(i32 jump, bool first_char, const char *match) 
+{
+    const int adjacency_bonus = 15;
+    const int separator_bonus = 30;
+    const int camel_bonus = 30;
+    const int first_letter_bonus = 15;
+
+    const int leading_letter_penalty = -5;
+    const int max_leading_letter_penalty = -15;
+
+    int32_t score = 0;
+
+    /* Apply bonuses. */
+    if (!first_char && jump == 0) 
+    {
+        score += adjacency_bonus;
+    }
+    if (!first_char || jump > 0) 
+    {
+        if (isupper((unsigned char) *match) &&
+            islower((unsigned char) *(match - 1))) 
+        {
+            score += camel_bonus;
+        }
+        if (isalnum((unsigned char) *match) &&
+            !isalnum((unsigned char) *(match - 1))) 
+        {
+            score += separator_bonus;
+        }
+    }
+
+    if (first_char && jump == 0) 
+    {
+        /* Match at start of string gets separator bonus. */
+        score += first_letter_bonus;
+    }
+
+    /* Apply penalties. */
+    if (first_char) 
+    {
+        score += MAX(leading_letter_penalty * jump, max_leading_letter_penalty);
+    }
+
+    return score;
 }
 
 
@@ -2061,13 +2697,13 @@ void threadpool_queue_job(thread_pool_t* pool, job_func_t func, void* data)
 void threadpool_wait(thread_pool_t* pool)
 {
     mutex_lock(&pool->queue_mutex);
-
-    while (arrlen(pool->jobs) > 0 ||
-           pool->active_jobs > 0)
     {
-        cond_wait(&pool->idle_condition, &pool->queue_mutex);
+        while (arrlen(pool->jobs) > 0 ||
+                pool->active_jobs > 0)
+        {
+            cond_wait(&pool->idle_condition, &pool->queue_mutex);
+        }
     }
-
     mutex_unlock(&pool->queue_mutex);
 }
 
@@ -2088,7 +2724,6 @@ bool threadpool_busy(thread_pool_t* pool)
     return busy;
 }
 
-
 /* -------------------- Processes stuff -------------------- */
 
 int set_non_blocking(pipe_handle fd)
@@ -2102,7 +2737,7 @@ int set_non_blocking(pipe_handle fd)
     #endif
 }
 
-int spawn_process(process_t *proc, const char *command)
+int spawn_process_async(process_t *proc, const char *command)
 {
 #ifdef _WIN32
     pipe_handle hReadPipe, hWritePipe;
@@ -2233,7 +2868,7 @@ int spawn_process(process_t *proc, const char *command)
 
 #define BUFFER_SIZE 1024
 
-void check_process_output(process_t *proc) 
+void check_process_output_async(process_t *proc) 
 {
     char buffer[BUFFER_SIZE];
 
@@ -2282,7 +2917,7 @@ void check_process_output(process_t *proc)
 #endif
 }
 
-int check_process_status(process_t *proc) 
+int check_process_status_async(process_t *proc) 
 {
 #ifdef _WIN32
     DWORD exit_code;
@@ -2296,7 +2931,7 @@ int check_process_status(process_t *proc)
         return 1;
     }
     
-    check_process_output(proc);
+    check_process_output_async(proc);
     
     CloseHandle(proc->pipe_fd);
     CloseHandle(proc->hProcess);
@@ -2319,7 +2954,7 @@ int check_process_status(process_t *proc)
     else if (result == proc->pid) 
     {
         // Read any remaining output
-        check_process_output(proc);
+        check_process_output_async(proc);
         
         close(proc->pipe_fd);
         proc->active = 0;
