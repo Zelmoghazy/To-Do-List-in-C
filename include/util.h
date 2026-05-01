@@ -169,6 +169,7 @@ const char* enum_strings[] = {
 #define RANGE_CONVERT(value, from_min, from_max, to_min, to_max) \
     (((value) - (from_min)) * ((to_max) - (to_min)) / ((from_max) - (from_min)) + (to_min))
 
+// Normalize a value from arbitrary range to [0 -> 1]
 #define NORMALIZE(val, min, max)        (((val) - (min)) / ((max) - (min)))
 
 #define WRAP_INDEX(pos, size)           (((pos) + (size)) % (size))
@@ -531,6 +532,7 @@ void log_color(char *text, char c);
 void log_error(i32 error_code, const char* file, i32 line);
 void *check_ptr (void *ptr, const char* file, i32 line);
 void dump_memory(void *ptr, i32 size);
+void membroadcast(void *dst, const void *src, size_t element_size, size_t count);
 
 void fast_srand(u32 seed);
 i32 fast_rand(void);

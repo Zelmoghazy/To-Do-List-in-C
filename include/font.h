@@ -67,7 +67,7 @@ font_tt* load_font_from_file(const char *filename, f32 font_size);
 font_tt* init_font_tt(u8 *font_buffer, f32 font_size);
 void free_font(font_tt *font);
 glyph_info_t* get_glyph(font_tt *font, u32 codepoint);
-void render_glyph_to_buffer_tt(font_tt *font, u32 codepoint, 
+glyph_info_t * render_glyph_to_buffer_tt(font_tt *font, u32 codepoint, 
                            image_view_t *color_buf,
                            u32 dst_x, u32 dst_y, color4_t color);
 void render_glyph_to_buffer_tt_scissored(font_tt *font, u32 codepoint, 

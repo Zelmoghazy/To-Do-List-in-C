@@ -56,7 +56,6 @@ font_tt* init_font_tt(u8 *font_buffer, f32 font_size)
 glyph_info_t* get_glyph(font_tt *font, u32 codepoint)
 {
     int cache_index = codepoint % GLYPH_CACHE_SIZE;
-    
     // check if it exists in the cache first
     if (font->cache_valid[cache_index]) {
         return &font->glyph_cache[cache_index];
@@ -83,8 +82,8 @@ glyph_info_t* get_glyph(font_tt *font, u32 codepoint)
     
     int w, h, xoff, yoff;
     u8 *bitmap = stbtt_GetGlyphBitmap(&font->info, 0, font->scale,
-                                      glyph_index, &w, &h, &xoff, &yoff);
-    
+                                    glyph_index, &w, &h, &xoff, &yoff);
+
     if (bitmap == NULL) {
         glyph->w = glyph->h = 0;
         glyph->bitmap = NULL;
@@ -105,13 +104,13 @@ glyph_info_t* get_glyph(font_tt *font, u32 codepoint)
     return glyph;
 }
 
-void render_glyph_to_buffer_tt(font_tt *font, u32 codepoint, 
+glyph_info_t *render_glyph_to_buffer_tt(font_tt *font, u32 codepoint, 
                            image_view_t *color_buf,
                            u32 dst_x, u32 dst_y, color4_t color)
 {
     glyph_info_t *glyph = get_glyph(font, codepoint);
     if (!glyph || !glyph->bitmap){
-        return;
+        return NULL;
     }
     
     int render_x = (int)dst_x + (int)glyph->bearing_x;
@@ -128,28 +127,23 @@ void render_glyph_to_buffer_tt(font_tt *font, u32 codepoint,
 
     int x_end = clipped.x + clipped.w;
     int y_end = clipped.y + clipped.h;
-    
+
     for (int y = y_start; y < y_end; y++) 
     {
+        int src_y = (int)(y - render_y);
         for (int x = x_start; x < x_end; x++) 
         {
             int src_x = (int)(x - render_x);
-            int src_y = (int)(y - render_y);
+            u8 alpha = glyph->bitmap[src_y * glyph->w + src_x];
             
-            if (src_x >= 0 && src_x < (int)glyph->w && 
-                src_y >= 0 && src_y < (int)glyph->h) 
+            if (alpha > 0) 
             {
-                
-                u8 alpha = glyph->bitmap[src_y * glyph->w + src_x];
-                
-                if (alpha > 0) 
-                {
-                    color.a = alpha;
-                    draw_pixel(color_buf, x, y, color);
-                }
+                color.a = alpha;
+                draw_pixel(color_buf, x, y, color);
             }
         }
     }
+    return glyph;
 }
 
 void render_glyph_to_buffer_tt_scissored(font_tt *font, u32 codepoint, 
@@ -183,21 +177,17 @@ void render_glyph_to_buffer_tt_scissored(font_tt *font, u32 codepoint,
 
     for (int y = y_start; y < y_end; y++)
     {
+        int src_y = (y - render_y);
         for (int x = x_start; x < x_end; x++)
         {
             int src_x = (x - render_x);
-            int src_y = (y - render_y);
 
-            if (src_x >= 0 && src_x < (int)glyph->w && 
-                src_y >= 0 && src_y < (int)glyph->h) 
+            u8 alpha = glyph->bitmap[src_y * glyph->w + src_x];
+            
+            if (alpha > 0) 
             {
-                u8 alpha = glyph->bitmap[src_y * glyph->w + src_x];
-                
-                if (alpha > 0) 
-                {
-                    color.a = alpha;
-                    set_pixel_scissored(color_buf, x, y, color);
-                }
+                color.a = alpha;
+                set_pixel_scissored(color_buf, x, y, color);
             }
         }
     }
@@ -215,34 +205,38 @@ void render_text_tt(image_view_t *color_buf, rendered_text_tt *text)
     f32 original_x = x;
     
     i32 line_height = get_line_height(text->font);
+
+    glyph_info_t *space_glyph = get_glyph(text->font, ' ');
+    f32 tab_width = space_glyph ? space_glyph->advance * TAB_SIZE : 0;
     
     while (*string) 
     {
-        if (*string == '\n') 
+        char c = *string++;
+
+        if (c == '\n') 
         {
-            y += line_height ;
+            y += line_height;
             x = original_x;
-            string++;
             continue;
         }
         
-        if (*string == '\t') 
+        if (c == '\t') 
         {
-            glyph_info_t *space_glyph = get_glyph(text->font, ' ');
-            if (space_glyph) {
-                x += space_glyph->advance * TAB_SIZE;
-            }
-            string++;
+            x += tab_width;
+            continue;
+        }
+
+        if (c == ' ') 
+        {
+            x += space_glyph->advance;
             continue;
         }
         
-        render_glyph_to_buffer_tt(text->font, *string, color_buf, (u32)x, (u32)y, text->color);
+        glyph_info_t *glyph = render_glyph_to_buffer_tt(text->font, c, color_buf, (u32)x, (u32)y, text->color);
         
-        glyph_info_t *glyph = get_glyph(text->font, *string);
         if (glyph) {
             x += glyph->advance ;
         }
-        string++;
     }
 }
 

@@ -220,8 +220,15 @@ static color4_t oklch_to_oklab(color4_t lch)
     };
 }
 
-static color4_t srgb_to_oklch(color4_t c) { return oklab_to_oklch(srgb_to_oklab(c)); }
-static color4_t oklch_to_srgb(color4_t c) { return oklab_to_srgb(oklch_to_oklab(c)); }
+static color4_t srgb_to_oklch(color4_t c) 
+{ 
+    return oklab_to_oklch(srgb_to_oklab(c)); 
+}
+
+static color4_t oklch_to_srgb(color4_t c) 
+{ 
+    return oklab_to_srgb(oklch_to_oklab(c)); 
+}
 
 color4_t color4_lerp(color4_t c1, color4_t c2, f32 t)
 {
@@ -333,7 +340,7 @@ color4_t rgb_from_wavelength(f64 wave)
     and can also contain information about transparency with an
     additional alpha channel indicating the opacity of each pixel
  */
-inline void set_pixel(image_view_t const *img, i32 x, i32 y, color4_t color) 
+static inline void set_pixel(image_view_t const *img, i32 x, i32 y, color4_t color) 
 {
     
     if (Inside(x, 0, (i32)img->width) &&
@@ -343,7 +350,7 @@ inline void set_pixel(image_view_t const *img, i32 x, i32 y, color4_t color)
     }
 }
 
-inline color4_t get_pixel(image_view_t const *img, i32 x, i32 y) 
+static inline color4_t get_pixel(image_view_t const *img, i32 x, i32 y) 
 {
     color4_t color = {0, 0, 0, 0};
 
@@ -357,7 +364,7 @@ inline color4_t get_pixel(image_view_t const *img, i32 x, i32 y)
 }
 
 /* alpha blending to combine stuff depending on transparency */
-inline color4_t blend_pixel(color4_t dst, color4_t src) 
+static inline color4_t blend_pixel(color4_t dst, color4_t src) 
 {
     if (IS_OPAQUE(src))
     {
@@ -371,18 +378,26 @@ inline color4_t blend_pixel(color4_t dst, color4_t src)
     
     u8 inv_alpha = 255 - src.a;
 
+    // color4_t result = {
+    //     .r = (src.r * src.a + dst.r * inv_alpha) * INV_255,
+    //     .g = (src.g * src.a + dst.g * inv_alpha) * INV_255,
+    //     .b = (src.b * src.a + dst.b * inv_alpha) * INV_255,
+    //     .a = src.a + (dst.a * inv_alpha) * INV_255
+    // };
+
+    // 1/256 but much faster
     color4_t result = {
-        .r = (src.r * src.a + dst.r * inv_alpha) * INV_255,
-        .g = (src.g * src.a + dst.g * inv_alpha) * INV_255,
-        .b = (src.b * src.a + dst.b * inv_alpha) * INV_255,
-        .a = src.a + (dst.a * inv_alpha) * INV_255
+        .r = (src.r * src.a + dst.r * inv_alpha) >> 8,
+        .g = (src.g * src.a + dst.g * inv_alpha) >> 8,
+        .b = (src.b * src.a + dst.b * inv_alpha) >> 8,
+        .a = src.a + ((dst.a * inv_alpha) >> 8)
     };
 
     return result;
 }
 
 /* Get existing color in the frame buffer and blend it witht the new color */
-inline void set_pixel_blend(image_view_t const *img, i32 x, i32 y, color4_t color) 
+static inline void set_pixel_blend(image_view_t const *img, i32 x, i32 y, color4_t color) 
 {
     if (IS_OPAQUE(color)) 
     {
@@ -396,7 +411,7 @@ inline void set_pixel_blend(image_view_t const *img, i32 x, i32 y, color4_t colo
 }
 
 // Used for anti-aliasing stuff
-inline void set_pixel_weighted(image_view_t *img, i32 x, i32 y, color4_t color, u8 weight) 
+static inline void set_pixel_weighted(image_view_t *img, i32 x, i32 y, color4_t color, u8 weight) 
 {
     color4_t weighted = color;
     weighted.a = ClampTop(255, (color.a * weight) * INV_255);
@@ -425,20 +440,30 @@ static void plot_4_points(image_view_t *img, i32 cx, i32 cy, i32 x, i32 y, f32 o
     }
 }
 
-void draw_pixel(image_view_t const *img, i32 x, i32 y, color4_t color) 
+inline void draw_pixel(image_view_t const *img, i32 x, i32 y, color4_t color) 
 {
     set_pixel_blend(img, x, y, color);
 }
 
 void clear_screen(image_view_t const *color_buf, color4_t const color)
 {
-    for (u32 y = 0; y < color_buf->height; ++y)
-    {
-        for(u32 x = 0; x < color_buf->width; ++x)
-        {    
-            BUF_AT(color_buf, x, y) = color;
-        }
-    }
+    /*     
+        for (u32 y = 0; y < color_buf->height; ++y)
+        {
+            for(u32 x = 0; x < color_buf->width; ++x)
+            {    
+                BUF_AT(color_buf, x, y) = color;
+            }
+        } 
+    */
+
+    // test if faster ?
+    membroadcast(
+        color_buf->pixels,
+        &color,
+        sizeof(color4_t),
+        color_buf->width * color_buf->height
+    );
 }
 
 void clear_screen_radial_gradient(image_view_t const *color_buf,
@@ -865,6 +890,8 @@ void draw_circle_aa(image_view_t *img, i32 cx, i32 cy, f32 radius, color4_t colo
     }
 }
 
+
+
 void draw_circle_filled_aa(image_view_t *img,
                            i32 cx, i32 cy,
                            f32 radius,
@@ -908,6 +935,77 @@ void draw_circle_filled_aa(image_view_t *img,
                                color,
                                alpha);
         }
+    }
+}
+
+#define WU_MAX_RADIUS 512
+#define MAX_J(r)  ((int)((r) * 0.7072f) + 1)
+
+static uint8_t D[WU_MAX_RADIUS][MAX_J(WU_MAX_RADIUS)];
+static bool    table_built = false;
+
+static inline void build_wu_table(void)
+{
+    if (table_built) return;
+    for (int r = 1; r < WU_MAX_RADIUS; r++) 
+    {
+        int j_max = MAX_J(r);
+        for (int j = 0; j <= j_max; j++) 
+        {
+            float x = sqrtf((float)(r*r - j*j));
+
+            //   D(r,j) = ⌊ (2^m - 1)(⌈√(r²-j²)⌉ - √(r²-j²)) + 0.5 ⌋
+            // With m=8 (256 levels), this simplifies to:
+            D[r][j] = (uint8_t)(((x - floorf(x)) * 255.0f) + 0.5f);
+        }
+    }
+    table_built = true;
+}
+
+static inline void plot8(image_view_t *img,
+                         int cx, int cy,
+                         int x,  int y,
+                         float alpha, color4_t color)
+{
+    plot_4_points(img, cx, cy,  x,  y, alpha, color);
+    plot_4_points(img, cx, cy,  y,  x, alpha, color);
+}
+
+inline void draw_circle_aa_table(image_view_t *img,
+                    int cx, int cy,
+                    float radius, color4_t color)
+{
+    if (radius <= 0) 
+        return;
+
+    int r = (int)roundf(radius);
+
+    if (r < 1 || r >= WU_MAX_RADIUS) 
+        return;
+
+    build_wu_table();
+
+    int   i    = r;
+    int   j    = 0;
+    uint8_t T  = 0;
+
+    plot8(img, cx, cy, r, 0, 1.0f, color);
+
+    while (i > j)
+    {
+        j++;
+        if (D[r][j] > T) 
+        {
+            i--;
+        } 
+
+        float outer = D[r][j]         / 255.0f;
+        float inner = (255 - D[r][j]) / 255.0f;
+
+        plot8(img, cx, cy, i,     j, inner, color);
+        plot8(img, cx, cy, i + 1, j, outer, color);
+
+        T = D[r][j];
     }
 }
 
@@ -2136,7 +2234,7 @@ void draw_radial_segment_filled(image_view_t *img,
                                  radial_segment_t *seg,
                                  color4_t color) 
 {
-    #define ARC_STEPS 32
+    #define ARC_STEPS    32
     #define MAX_VERTICES (ARC_STEPS * 2)
     
     i32 vx[MAX_VERTICES];

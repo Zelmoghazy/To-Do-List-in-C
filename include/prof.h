@@ -18,7 +18,7 @@
 #ifndef PROF_H_INCLUDE_
 #define PROF_H_INCLUDE_
 
-#define SIZE 10000000
+#define PROF_BUF_SIZE 10000000
 #define MAX_PROFILE_ENTRIES 1024
 
 #define DEFER(begin, end) \

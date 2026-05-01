@@ -97,6 +97,24 @@ void dump_memory(void *ptr, i32 size)
     }
     return;
 }
+
+void membroadcast(void *dst, const void *src, size_t element_size, size_t count)
+{
+    if (count == 0) return;
+
+    memcpy(dst, src, element_size);
+
+    size_t filled = 1;
+    while (filled < count)
+    {
+        size_t to_copy = filled < (count - filled) ? filled : (count - filled);
+        memcpy((char *)dst + filled * element_size,
+               dst,
+               to_copy * element_size);
+        filled += to_copy;
+    }
+}
+
 #ifdef _WIN32
     __declspec(thread) u32 g_seed;
 #else
@@ -164,9 +182,9 @@ u32 djb2_hash(const char *str)
 
 u32 fnv1a_hash(const char *str) 
 {
-    uint32_t hash = 2166136261u;
+    u32 hash = 2166136261u;
     while (*str) {
-        hash ^= (uint8_t)*str++;
+        hash ^= (u8)*str++;
         hash *= 16777619u;
     }
     return hash;
@@ -185,7 +203,7 @@ u64 arith_mod(u64 x, u64 y)
 // Hermite interpolation f(t)=3t²-2t³
 static inline f32 smoothstep(f32 edge0, f32 edge1, f32 x) 
 {
-    f32 t = Clamp(0.0f, (x - edge0) / (edge1 - edge0), 1.0f);
+    f32 t = Clamp(0.0f, NORMALIZE(x, edge0, edge1), 1.0f);
     return t * t * (3.0f - 2.0f * t);
 }
 
@@ -206,7 +224,7 @@ f32 d_sqrt(f32 number)
     return number * y;
 }
 
-static f32 trig_values[] = 
+static const f32 trig_values[] = 
 { 
     0.0000f,0.0175f,0.0349f,0.0523f,0.0698f,0.0872f,0.1045f,0.1219f,
     0.1392f,0.1564f,0.1736f,0.1908f,0.2079f,0.2250f,0.2419f,0.2588f,
@@ -258,7 +276,8 @@ void resample(int* arr, int n, int m, int* out)
 {
     if (m == 1) { out[0] = arr[0]; return; }
 
-    for (int i = 0; i < m; i++) {
+    for (int i = 0; i < m; i++) 
+    {
         if (i == 0)     { out[i] = arr[0];     continue; }
         if (i == m - 1) { out[i] = arr[n - 1]; continue; }
 
@@ -1561,7 +1580,7 @@ void morph_start(poly_morph_t *m,
 
     // naive resamplin works ok for now for general n to m vert morph
     resample(src_x, n, dst_count, m->start_x);
-    resample(src_y, n, dst_count, m->start_y);   // was the bug: src_x used twice
+    resample(src_y, n, dst_count, m->start_y);   
 
     for (int i = 0; i < dst_count; i++) {
         m->target_x[i] = (f32)dst_x[i];
@@ -1598,6 +1617,20 @@ void morph_stop(poly_morph_t *m)
 }
 
 /* -------------------- Timing stuff -------------------- */
+
+f64 get_current_time(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER now, f;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&now);
+    return (f64)now.QuadPart / (f64)f.QuadPart;
+#else
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec + now.tv_nsec / 1e9;
+#endif
+}
 
 f64 get_time_difference(void *last_time) 
 {
@@ -1696,6 +1729,126 @@ u64 tsc_calibrate(void)
 #endif
     return (u64)((tsc1 - tsc0) / elapsed);
 }
+
+static inline u64 get_rdtsc_freq(void) 
+{
+    // Cache the answer so that multiple calls never take the slow path more than once
+    static uint64_t tsc_freq = 0;
+    if (tsc_freq) {
+        return tsc_freq;
+    }
+    #ifdef _WIN32
+        // Fast path: Load kernel-mapped memory page
+        HMODULE ntdll = LoadLibraryA("ntdll.dll");
+
+        if (ntdll) 
+        {
+            int (*NtQuerySystemInformation)(int, void *, unsigned int, unsigned int *) =
+                (int (*)(int, void *, unsigned int, unsigned int *))GetProcAddress(ntdll, "NtQuerySystemInformation");
+
+            if (NtQuerySystemInformation) 
+            {
+                volatile uint64_t *hypervisor_shared_page = NULL;
+                unsigned int size = 0;
+
+                // SystemHypervisorSharedPageInformation == 0xc5
+                int result = (NtQuerySystemInformation)(0xc5, (void *)&hypervisor_shared_page, sizeof(hypervisor_shared_page), &size);
+
+                // success
+                if (size == sizeof(hypervisor_shared_page) && result >= 0) 
+                {
+                    // docs say ReferenceTime = ((VirtualTsc * TscScale) >> 64)
+                    //      set ReferenceTime = 10000000 = 1 second @ 10MHz, solve for VirtualTsc
+                    //       =>    VirtualTsc = 10000000 / (TscScale >> 64)
+                    tsc_freq = (10000000ull << 32) / (hypervisor_shared_page[1] >> 32);
+                    // If your build configuration supports 128 bit arithmetic, do this:
+                    // tsc_freq = ((unsigned __int128)10000000ull << (unsigned __int128)64ull) / hypervisor_shared_page[1];
+                }
+            }
+            FreeLibrary(ntdll);
+        }
+
+        // Slow path
+        if (!tsc_freq)  
+        {
+            // Get time before sleep
+            uint64_t qpc_begin = 0; QueryPerformanceCounter((LARGE_INTEGER *)&qpc_begin);
+            uint64_t tsc_begin = __rdtsc();
+
+            Sleep(2);
+
+            // Get time after sleep
+            uint64_t qpc_end = qpc_begin + 1; QueryPerformanceCounter((LARGE_INTEGER *)&qpc_end);
+            uint64_t tsc_end = __rdtsc();
+
+            // Do the math to extrapolate the RDTSC ticks elapsed in 1 second
+            uint64_t qpc_freq = 0; QueryPerformanceFrequency((LARGE_INTEGER *)&qpc_freq);
+            tsc_freq = (tsc_end - tsc_begin) * qpc_freq / (qpc_end - qpc_begin);
+        }
+
+        // Failure case
+        if (!tsc_freq) {
+            tsc_freq = 1000000000;
+        }
+
+        return tsc_freq;
+    #else
+        // Fast path: Load kernel-mapped memory page
+        struct perf_event_attr pe = {0};
+        pe.type = PERF_TYPE_HARDWARE;
+        pe.size = sizeof(struct perf_event_attr);
+        pe.config = PERF_COUNT_HW_INSTRUCTIONS;
+        pe.disabled = 1;
+        pe.exclude_kernel = 1;
+        pe.exclude_hv = 1;
+
+        // __NR_perf_event_open == 298 (on x86_64)
+        int fd = syscall(298, &pe, 0, -1, -1, 0);
+        if (fd != -1) {
+
+            struct perf_event_mmap_page *pc = (struct perf_event_mmap_page *)mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+            if (pc) {
+
+                // success
+                if (pc->cap_user_time == 1) {
+                    // docs say nanoseconds = (tsc * time_mult) >> time_shift
+                    //      set nanoseconds = 1000000000 = 1 second in nanoseconds, solve for tsc
+                    //       =>         tsc = 1000000000 / (time_mult >> time_shift)
+                    tsc_freq = (1000000000ull << (pc->time_shift / 2)) / (pc->time_mult >> (pc->time_shift - pc->time_shift / 2));
+                    // If your build configuration supports 128 bit arithmetic, do this:
+                    // tsc_freq = ((__uint128_t)1000000000ull << (__uint128_t)pc->time_shift) / pc->time_mult;
+                }
+                munmap(pc, 4096);
+            }
+            close(fd);
+        }
+
+        // Slow path
+        if (!tsc_freq) 
+        {
+            // Get time before sleep
+            uint64_t nsc_begin = 0; { struct timespec t; if (!clock_gettime(CLOCK_MONOTONIC_RAW, &t)) nsc_begin = (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+            uint64_t tsc_begin = __rdtsc();
+
+            usleep(10000); // 10ms gives ~4.5 digits of precision - the longer you sleep, the more precise you get
+
+            // Get time after sleep
+            uint64_t nsc_end = nsc_begin + 1; { struct timespec t; if (!clock_gettime(CLOCK_MONOTONIC_RAW, &t)) nsc_end = (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+            uint64_t tsc_end = __rdtsc();
+
+            // Do the math to extrapolate the RDTSC ticks elapsed in 1 second
+            tsc_freq = (tsc_end - tsc_begin) * 1000000000 / (nsc_end - nsc_begin);
+        }
+
+        // Failure case
+        if (!tsc_freq) {
+            tsc_freq = 1000000000;
+        }
+
+        return tsc_freq;
+    #endif
+}
+
 /* -------------------- File stuff -------------------- */
 
 /*
@@ -1708,6 +1861,22 @@ const char* get_file_extension(const char *filepath)
         return NULL;
     }
     return dot+1;
+}
+
+uint64_t get_file_mod_time(const char *path)
+{
+    #ifdef _WIN32
+        WIN32_FILE_ATTRIBUTE_DATA attr;
+        GetFileAttributesExA(path, GetFileExInfoStandard, &attr);
+        ULARGE_INTEGER ull;
+        ull.LowPart = attr.ftLastWriteTime.dwLowDateTime;
+        ull.HighPart = attr.ftLastWriteTime.dwHighDateTime;
+        return ull.QuadPart;
+    #else
+        struct stat attr;
+        stat(path, &attr);
+        return (long long)attr.st_mtime;
+    #endif
 }
 
 unsigned char* read_file(const char* font_path)

@@ -20,10 +20,11 @@
 #undef STB_DS_IMPLEMENTATION 
 
 #define PROF_IMPLEMENTATION
+#include "./include/prof.h"
+#undef PROF_IMPLEMENTATION
 #include "./include/util.h"
 #include "./include/arena.h"
 #include "./include/base_graphics.h"
-#include "./include/prof.h"
 #include "./include/font.h"
 #include "./include/todo.h"
 
@@ -139,7 +140,8 @@ typedef struct ui_block_t
     bool toggleable;
     bool toggled;
 
-    f32 drag_start_x, drag_start_y;
+    f32 drag_start_x, drag_start_y;     // used for anchoring stuff to mouse pos
+    f32 drag_delta_x, drag_delta_y;     // all requiring relative motion
 
     f32 value;
     f32 min_value;
@@ -372,7 +374,7 @@ void prof_record_results(void)
     {
         if (g_prof_storage.entries[i].hit_count > 0) 
         {
-            snprintf(prof_buf[i], BUFFER_SIZE, "[PROFILE] %s[%llu]: %.6f ms (total)", 
+            snprintf(prof_buf[i], BUFFER_SIZE, "- %s[%llu]: %.6f ms (total)", 
                    g_prof_storage.entries[i].label,
                    (u64)g_prof_storage.entries[i].hit_count,
                    g_prof_storage.entries[i].elapsed_ms);
@@ -394,16 +396,20 @@ void render_prof_entries(void)
 
     draw_rect_solid_wh(&gc.draw_buffer, 0, 0, width+10, height+10, HEX_TO_COLOR4(0x282a36));
 
-    for(int i = 0; i < prof_buf_count; i++)
+    PROFILE("Rendering all prof entries")
     {
-        rendered_text_tt text = {
-            .font = gc.font,
-            .pos = {.x=0,.y=i*get_line_height(gc.font)},
-            .color = COLOR_WHITE,
-            .string = prof_buf[i]
-        };
-        render_text_tt(&gc.draw_buffer, &text);
+        for(int i = 0; i < prof_buf_count; i++)
+        {
+            rendered_text_tt text = {
+                .font = gc.font,
+                .pos = {.x=0,.y=i*get_line_height(gc.font)},
+                .color = COLOR_WHITE,
+                .string = prof_buf[i]
+            };
+            render_text_tt(&gc.draw_buffer, &text);
+        }
     }
+
 }
 
 void reset_input_for_frame(void) 
@@ -468,7 +474,7 @@ void mouse_callback(GLFWwindow* window, f64 xpos, f64 ypos)
     get_mouse_delta(&xoffset, &yoffset);
 
     gc.mouse_xoffs+=xoffset;
-    gc.mouse_yoffs+=xoffset;
+    gc.mouse_yoffs+=yoffset;
 
     gc.mouse_move = true;
 }
@@ -912,11 +918,24 @@ void ui_scroll_block(ui_block_t *block, i32 delta_x, i32 delta_y)
     }
 }
 
+static f32 ui_drag_velocity_factor(ui_block_t *block)
+{
+    f32 cx = block->abs_x + block->w * 0.5f;
+    f32 cy = block->abs_y + block->h * 0.5f;
+    f32 r  = (f32)(block->w < block->h ? block->w : block->h) * 0.5f;
+
+    f32 dx = gc.mouse_x - cx;
+    f32 dy = gc.mouse_y - cy;
+    f32 dist = sqrtf(dx*dx + dy*dy);
+
+    // normalize against knob radius, clamp to [0,1]
+    f32 normalized = Clamp(0.0f, dist / (r * 3.0f), 1.0f);
+
+    return LERP_F32(0.05f, 2.0f, normalized);
+}
+
 void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
 {
-    (void)delta_x;
-    (void)delta_y;
-
     // block interaction not inside the modal block when active
     if (ctx->modal_active && ctx->modal_block) 
     {
@@ -937,8 +956,8 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
         {
             target->hover = true;
             // start hot animation
-            if(!animation_get(target->id, &target->hot_anim_t)){
-                animation_start((u64)target->id, 0.0f, 1.0f, 0.2f, EASE_IN_OUT_CUBIC);
+            if(!animation_get((u64)&target->hot_anim_t, &target->hot_anim_t)){
+                animation_start((u64)&target->hot_anim_t, 0.0f, 1.0f, 0.2f, EASE_IN_OUT_CUBIC);
             }
             ui_block_save_state(target);
         }
@@ -955,9 +974,20 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
     if(ctx->active_block_id)
     {
         ui_block_t *active = ui_block_find_by_id(ctx, ctx->active_block_id);
-        if(active && active->custom_update)
+        if(active)
         {
-            active->custom_update(active);
+            // if its draggable 
+            if(active->draggable && active->dragging)
+            {
+                f32 drag_delta = delta_x + delta_y;
+                active->value += drag_delta * ui_drag_velocity_factor(active);
+                active->value = Clamp(active->min_value, active->value, active->max_value);
+            }
+            if(active->custom_update)
+            {
+                active->custom_update(active);
+            }
+
             ui_block_save_state(active);
         }
     }
@@ -1049,10 +1079,11 @@ void ui_handle_mouse_button(ui_context_t *ctx)
                 if(!target->clicked)
                 {
                     target->clicked = true;
-                    if(!animation_get(target->id+1, &target->active_anim_t)){
-                        animation_start((u64)target->id+1, 0.0f, 1.0f, 0.1f, EASE_IN_OUT_CUBIC);
+                    if(!animation_get((u64)&target->active_anim_t, &target->active_anim_t)){
+                        animation_start((u64)&target->active_anim_t, 0.0f, 1.0f, 0.1f, EASE_IN_OUT_CUBIC);
                     }
                 }
+
                 rect_t drag_rect;
                 hit_region_t region = is_in_hit_region(target, gc.mouse_x, gc.mouse_y, &drag_rect);
 
@@ -1098,6 +1129,12 @@ void ui_handle_mouse_button(ui_context_t *ctx)
                             target->dragging = true;
                             target->drag_start_x = target->abs_x - gc.mouse_x;
                             target->drag_start_y = target->abs_y - gc.mouse_y;
+                        }
+                        break;
+                    default:
+                        if(target->draggable && !target->dragging)
+                        {
+                            target->dragging = true;
                         }
                         break;
                 }
@@ -1959,12 +1996,12 @@ bool ui_button(ui_context_t *ctx, char *title)
     button->hover_color = lite(HEX_TO_COLOR4(0xbd93f9));
     button->custom_render = ui_render_button;
 
-    if(!animation_get(button->id, &button->hot_anim_t))
+    if(!animation_get((u64)&button->hot_anim_t, &button->hot_anim_t))
     {
         button->hot_anim_t = button->hover;
     }
 
-    if(!animation_get(button->id+1, &button->active_anim_t))
+    if(!animation_get((u64)&button->active_anim_t, &button->active_anim_t))
     {
         button->active_anim_t = button->clicked;
     }
@@ -1978,6 +2015,80 @@ bool ui_button(ui_context_t *ctx, char *title)
     ui_add_child(ctx, button);
 
     return release;
+}
+
+/* -------------- Toggle Widget Stuff -------------- */
+
+void ui_render_toggle(ui_block_t *block)
+{
+    i32 track_w = 44;
+    i32 track_h = 24;
+    i32 track_x = 10;
+    i32 track_y = (block->h - track_h) / 2;
+
+    color4_t track_off   = HEX_TO_COLOR4(0x44475a);
+    color4_t track_on    = HEX_TO_COLOR4(0x50fa7b);
+    color4_t track_color = color4_lerp(track_off, track_on, block->active_anim_t);
+
+    track_color = color4_lerp(track_color, lite(track_color), block->hot_anim_t * 0.3f);
+
+    ui_draw_rounded_rect_in_block(block, track_x, track_y,
+                                  track_w, track_h, track_color);
+
+    i32 thumb_size   = track_h - 6;
+    i32 thumb_x_off  = (i32)(block->active_anim_t * (track_w - thumb_size - 6));
+    i32 thumb_x      = track_x + 3 + thumb_x_off;
+    i32 thumb_y      = track_y + 3;
+
+    color4_t thumb_color = HEX_TO_COLOR4(0xf8f8f2);
+
+    draw_circle_filled_aa(&gc.draw_buffer,
+                          block->abs_x + thumb_x + thumb_size / 2,
+                          block->abs_y + thumb_y + thumb_size / 2,
+                          thumb_size / 2.0f,
+                          thumb_color);
+
+    // if (block->text.string)
+    // {
+    //     block->text.pos.x = track_x + track_w + 10;
+    //     block->text.pos.y = (block->h - get_line_height(block->text.font)) / 2;
+    //     ui_render_text_in_block(block);
+    // }
+}
+bool ui_toggle(ui_context_t *ctx, char *title)
+{
+    ui_block_t *toggle = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT));
+
+    toggle->is_leaf    = true;
+    toggle->clickable  = true;
+    toggle->toggleable = true;
+
+    toggle->bg_color    = HEX_TO_COLOR4(0x282a36);
+    toggle->hover_color = lite(HEX_TO_COLOR4(0x282a36));
+
+    toggle->custom_render = ui_render_toggle;
+
+    if (!animation_get((u64)&toggle->hot_anim_t, &toggle->hot_anim_t))
+        toggle->hot_anim_t = toggle->hover ? 1.0f : 0.0f;
+
+    if (!animation_get((u64)&toggle->active_anim_t, &toggle->active_anim_t))
+    {
+        toggle->active_anim_t = toggle->toggled ? 1.0f : 0.0f;
+    }
+    static bool prev_toggled = false;
+    if (toggle->toggled != prev_toggled)
+    {
+        animation_start((u64)toggle->active_anim_t,
+                        toggle->active_anim_t,
+                        toggle->toggled ? 1.0f : 0.0f,
+                        0.15f,
+                        EASE_IN_OUT_CUBIC);
+        prev_toggled = toggle->toggled;
+    }
+
+    ui_add_child(ctx, toggle);
+
+    return toggle->toggled;
 }
 
 /* -------------- Radio Button Widget Stuff -------------- */
@@ -2126,7 +2237,7 @@ void ui_render_slider(ui_block_t *block)
 
 void ui_update_slider(ui_block_t *block) 
 {
-    block->value = block->value < block->min_value?block->min_value:block->value;
+    block->value = Clamp(block->min_value, block->value, block->max_value);
     
     if(block->id != gc.ui_ctx->active_block_id)
     {
@@ -2177,6 +2288,108 @@ f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
     return slider->value;
 }
 
+/* -------------- Knob Widget stuff -------------- */
+
+void ui_render_knob(ui_block_t *block)
+{
+    #define KNOB_START_ANGLE  (M_PI * 0.75f)   
+    #define KNOB_END_ANGLE    (M_PI * 2.25f)   
+
+    f32 cx = block->w * 0.5f;
+    f32 cy = block->h * 0.5f;
+    f32 r  = (f32)(block->w < block->h ? block->w : block->h) * 0.5f;
+
+    f32 pulse = r * 0.08f * block->hot_anim_t;
+
+    radial_layout_t layout = {
+        .center_x     = block->abs_x + cx,
+        .center_y     = block->abs_y + cy,
+        .scale_x      = 1.0f,
+        .scale_y      = 1.0f,
+        .inner_radius = r * 0.55f,
+        .outer_radius = r * 0.95f + pulse,
+        .num_segments = 1,
+        .gap_factor   = 0.0f,
+        .rotation     = 0.0f,
+    };
+
+    if (block->hot_anim_t > 0.01f)
+    {
+        radial_segment_t glow = {
+            .angle_start  = KNOB_START_ANGLE,
+            .angle_end    = KNOB_START_ANGLE + block->hot_anim_t * 2.0f * M_PI,
+            .inner_radius = layout.outer_radius + 3.0f,
+            .outer_radius = layout.outer_radius + 3.0f + 5.0f * block->hot_anim_t,
+        };
+        color4_t glow_color = HEX_TO_COLOR4(0xbd93f9);
+        glow_color.a = (u8)(120 * block->hot_anim_t);
+        draw_radial_segment_filled(&gc.draw_buffer, &layout, &glow, glow_color);
+    }
+
+    radial_segment_t track = {
+        .angle_start  = KNOB_START_ANGLE,
+        .angle_end    = KNOB_END_ANGLE,
+        .inner_radius = layout.inner_radius,
+        .outer_radius = layout.outer_radius,
+    };
+    color4_t track_color = HEX_TO_COLOR4(0x44475a);
+    draw_radial_segment_filled(&gc.draw_buffer, &layout, &track, track_color);
+
+    f32 t = 0.0f; 
+    if (block->max_value > block->min_value){
+        t = NORMALIZE(block->value, block->min_value, block->max_value);
+    }
+
+    f32 fill_end = KNOB_START_ANGLE + t * (KNOB_END_ANGLE - KNOB_START_ANGLE);
+
+    if (fill_end > KNOB_START_ANGLE + 0.01f)
+    {
+        color4_t fill_color = color4_lerp(HEX_TO_COLOR4(0xbd93f9),
+                                          HEX_TO_COLOR4(0x47c179), t);
+        fill_color = color4_lerp(fill_color, lite(fill_color), block->hot_anim_t * 0.4f);
+
+        radial_segment_t fill = {
+            .angle_start  = KNOB_START_ANGLE,
+            .angle_end    = fill_end,
+            .inner_radius = layout.inner_radius,
+            .outer_radius = layout.outer_radius,
+        };
+        draw_radial_segment_filled(&gc.draw_buffer, &layout, &fill, fill_color);
+    }
+
+    f32 dot_angle = KNOB_START_ANGLE + t * (KNOB_END_ANGLE - KNOB_START_ANGLE);
+    f32 dot_r     = (layout.inner_radius + layout.outer_radius) * 0.5f;
+    f32 dot_x, dot_y;
+    polar_to_cartesian((polar_t){dot_r, dot_angle},
+                       layout.center_x, layout.center_y,
+                       1.0f, 1.0f, &dot_x, &dot_y);
+
+    f32 dot_size = 4.0f + 3.0f * block->hot_anim_t;
+    draw_circle_filled_aa(&gc.draw_buffer, (i32)dot_x, (i32)dot_y, (i32)dot_size,
+                          HEX_TO_COLOR4(0xffffff));
+}
+
+f32 ui_knob(ui_context_t *ctx, char *title, f32 min, f32 max)
+{
+    if (!ctx->current_block) return 0;
+
+    ui_block_t *knob = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 0, NO_LAYOUT));
+
+    knob->is_leaf      = true;
+    knob->draggable    = true;
+    knob->clickable    = true;
+    knob->min_value    = min;
+    knob->max_value    = max;
+    knob->custom_render = ui_render_knob;
+
+    if (!animation_get((u64)&knob->hot_anim_t, &knob->hot_anim_t))
+        knob->hot_anim_t = knob->hover;
+
+    ui_add_child(ctx, knob);
+
+    return knob->value;
+}
+
 /* -------------- Tree Widget stuff -------------- */
 typedef struct{
     bool collapsed;
@@ -2187,10 +2400,6 @@ typedef struct {char *key; tree_node_state_t value; } tree_widget_map_t;
 tree_widget_map_t *g_tree_widget_map = NULL;
 
 void ui_update_tree_node(ui_block_t *block) 
-{
-}
-
-void ui_render_tree_node(ui_block_t *block) 
 {
     tree_widget_map_t *map_entry = shgetp_null(g_tree_widget_map, block->title);
     if (!map_entry) return;
@@ -2203,6 +2412,14 @@ void ui_render_tree_node(ui_block_t *block)
         block->released = false;
         TOGGLE(node->collapsed);
     }
+}
+
+void ui_render_tree_node(ui_block_t *block) 
+{
+    tree_widget_map_t *map_entry = shgetp_null(g_tree_widget_map, block->title);
+    if (!map_entry) return;
+    
+    tree_node_state_t *node = &map_entry->value;
 
     color4_t color = block->hover?HEX_TO_COLOR4(0x287fc9):COLOR_TRANSPARENT;
 
@@ -2213,27 +2430,13 @@ void ui_render_tree_node(ui_block_t *block)
 
     if (block->text.string) 
     {
-        if(node->collapsed)
-        {
-            rendered_text_tt icon = {
-                .font = gc.icon_font,
-                .pos = {.x = screen_x, .y = screen_y},
-                .color = COLOR_WHITE,
-                .string = RIGHT_CIRCLE_ARROW
-            };
-            render_string_unicode(&gc.draw_buffer, &icon);
-        }
-        else
-        {
-            rendered_text_tt icon = {
-                .font = gc.icon_font,
-                .pos = {.x = screen_x, .y = screen_y},
-                .color = COLOR_WHITE,
-                .string = DOWN_CIRCLE_ARROW
-            };
-
-            render_string_unicode(&gc.draw_buffer, &icon);
-        }
+        rendered_text_tt icon = {
+            .font = gc.icon_font,
+            .pos = {.x = screen_x, .y = screen_y},
+            .color = COLOR_WHITE,
+            .string = node->collapsed?RIGHT_CIRCLE_ARROW:DOWN_CIRCLE_ARROW,
+        };
+        render_string_unicode(&gc.draw_buffer, &icon);
 
         block->text.pos.x = 50;
         block->text.pos.y = (block->h - get_line_height(block->text.font)) / 2;
@@ -2270,7 +2473,7 @@ bool ui_tree_node_begin(ui_context_t *ctx, char *title)
     }
 
     node->custom_render = ui_render_tree_node;
-    node->custom_update = NULL;
+    node->custom_update = ui_update_tree_node;
 
     char *node_panel = ARENA_ALLOC(gc.frame_arena, 128);
     snprintf(node_panel, 128, "title-%s",title);
@@ -3474,7 +3677,7 @@ void render_layout_test_screen(void)
                 ui_begin_panel(gc.ui_ctx, "Test1-2", 0, 0, 50, 0, HORIZONTAL_LAYOUT);
                 ui_end_panel(gc.ui_ctx);
                 ui_button(gc.ui_ctx,"Buttton1");
-                ui_button(gc.ui_ctx,"Buttton2");
+                ui_button(gc.ui_ctx,"Buttton23");
             ui_end_panel(gc.ui_ctx);
                 
             ui_begin_panel(gc.ui_ctx, "Test2", 0, 0, 0, 400, VERTICAL_LAYOUT);
@@ -3499,6 +3702,7 @@ void render_layout_test_screen(void)
                 {
                     ui_button(gc.ui_ctx,"Node does it work");
                     ui_button(gc.ui_ctx,"I truely want it to work");
+
                     ui_tree_node_end(gc.ui_ctx);
                 } 
                 if(ui_tree_node_begin(gc.ui_ctx, "Second Node"))
@@ -3513,12 +3717,13 @@ void render_layout_test_screen(void)
                     }
                     ui_tree_node_end(gc.ui_ctx);
                 } 
+                f32 knob_val = ui_knob(gc.ui_ctx, "volume", 0.0f, 100.0f);
+                ui_toggle(gc.ui_ctx, "toggle");
                 f32 val = ui_slider(gc.ui_ctx, 50.0f, 600.0f,"Slider");
                 text_state = ui_text_edit(gc.ui_ctx, "TextEdit1", 0,0,200,"Add your task ..");
                 ui_text_label(gc.ui_ctx, "MultiLine", 
                               "Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. ",
                               0, 0, val, HEX_TO_COLOR4(0x3d005c),true);
-
             ui_end_panel(gc.ui_ctx);
 
             ui_begin_panel(gc.ui_ctx, "Test4", 0, 0, 0, 300, NO_LAYOUT);
@@ -3551,21 +3756,26 @@ void render_layout_test_screen(void)
 
 void render_debug_screen(void)
 {
-    render_frame_history_graph();
-    
-    rendered_text_tt frame_time = {
-        .font = gc.font,
-        .pos = {.x=gc.screen_width - (10+get_string_width(gc.font, frametime)), .y=0},
-        .color = COLOR_WHITE,
-        .string = frametime
-    };
-    
-    snprintf(frametime, BUFFER_SIZE, "%.2f ms", gc.average_frame_time*1000);
-    render_text_tt(&gc.draw_buffer, &frame_time);
-    
-    if(gc.profile)
+    PROFILE("Rendering Debug graph")
     {
-        render_prof_entries();
+        render_frame_history_graph();
+    }
+
+    PROFILE("Rendering Debug Text")
+    {
+        rendered_text_tt frame_time = {
+            .font = gc.font,
+            .pos = {.x=gc.screen_width - (10+get_string_width(gc.font, frametime)), .y=0},
+            .color = COLOR_WHITE,
+            .string = frametime
+        };
+        snprintf(frametime, BUFFER_SIZE, "%.2f ms", gc.average_frame_time*1000);
+        render_text_tt(&gc.draw_buffer, &frame_time);
+    
+        if(gc.profile)
+        {
+            render_prof_entries();
+        }
     }
 
     for(i32 i = gc.ui_ctx->block_count-1 ; i >= 0; i--)
@@ -3633,9 +3843,16 @@ void render_interactive_texture(void)
     static i32 drag_offset_y = 0;
     static bool dragging = false;
 
+    bool inside = inside_rect(gc.mouse_x, gc.mouse_y, &new_pos);
+
+    if(inside)
+    {
+        draw_rect_outline_wh(&gc.draw_buffer, new_pos.x, new_pos.y, new_pos.w, new_pos.h, HEX_TO_COLOR4(0x466472));
+    }
+
     if (gc.left_button_down)
     {
-        if (!dragging && inside_rect(gc.mouse_x, gc.mouse_y, &new_pos))
+        if (!dragging && inside)
         {
             dragging = true;
             drag_offset_x = gc.mouse_x - new_pos.x;
@@ -3674,7 +3891,8 @@ void render_all(void)
     
     ui_new_frame(gc.ui_ctx);
 
-    PROFILE("Main screen"){
+    PROFILE("Main screen")
+    {
         render_layout_test_screen();
         // render_interactive_texture();
         // render_floating_panel_test();
@@ -3685,7 +3903,8 @@ void render_all(void)
  
     if(gc.debug)
     {
-        PROFILE("Debug Screen"){
+        PROFILE("Debug Screen")
+        {
             render_debug_screen();
         }
     }
@@ -3699,7 +3918,7 @@ void render_all(void)
     }
 }
 
-void update_time()
+void update_time(void)
 {
     gc.dt = get_time_difference(&gc.last_frame_start);
     
@@ -3782,7 +4001,7 @@ void *create_window(u32 width, u32 height, char *title)
     
     glfwMakeContextCurrent(window);
 
-    glfwSwapInterval(1);
+    glfwSwapInterval(0);
     
     glViewport(0, 0, (int)width, (int)height);
     
@@ -3888,21 +4107,25 @@ int main(void)
 
     while(!glfwWindowShouldClose((GLFWwindow*)gc.window))
     {
-        PROFILE("Events")
+        PROFILE("Total Actual Time")
         {
-            poll_events();
+            PROFILE("Updating All")
+            {
+                update_all();
+            }
+            
+            PROFILE("Rendering all")
+            {
+                render_all();
+            }
+
+            PROFILE("Events")
+            {
+                poll_events();
+            }
+            
         }
 
-        PROFILE("Updating All")
-        {
-            update_all();
-        }
-        
-        PROFILE("Rendering all")
-        {
-            render_all();
-        }
-        
         cleanup_all();
 
         PROFILE("Presenting The frame")
