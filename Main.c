@@ -49,6 +49,8 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;//AMD
 #define BUFFER_SIZE         512
 #define MAX_BLOCKS          256
 
+#define ANIMATION_TIME      0.2f
+
 /*
     Stuff that we wish to retain between frames
     per block
@@ -1010,16 +1012,21 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
     /* Hovered */    
     if(hovered && hovered->visible)
     {
-        ix->hot_id = hovered->id;
-
         // was not hot last frame
         if(ix->hot_id != hovered->id)
         {
+            // was hot 
+            if(ix->hot_id)
+            {
+                u64 old_hot_id = djb2_hash_append(ix->hot_id, "hot");
+                animation_start(old_hot_id, 1.0f, 0.0f, ANIMATION_TIME, EASE_IN_OUT_CUBIC);
+            }
             ix->hot_id = hovered->id;
             u64 hot_id = djb2_hash_append(hovered->id, "hot");
             // start hot animation
             if(!animation_get(hot_id, &hovered->hot_anim_t)){
-                animation_start(hot_id, 0.0f, 1.0f, 0.2f, EASE_IN_OUT_CUBIC);
+                printf("starting hot anim for %s\n", hovered->title);
+                animation_start(hot_id, 0.0f, 1.0f, ANIMATION_TIME, EASE_IN_OUT_CUBIC);
             }
         }
 
@@ -1078,9 +1085,10 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
             active->abs_x = new_x;
             break;
         }
-        case UI_INTERACT_RESIZE_RIGHT:
+        case UI_INTERACT_RESIZE_RIGHT: {
             active->w = (i32)(gc.mouse_x + ix->drag_start_x) - active->abs_x;
             break;
+        }
         case UI_INTERACT_RESIZE_TOP: {
             i32 new_y   = (i32)(gc.mouse_y + ix->drag_start_y);
             active->h  += active->abs_y - new_y;
@@ -1088,21 +1096,24 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
             break;
         }
         case UI_INTERACT_RESIZE_BOTTOM:
+        {
             active->h = (i32)(gc.mouse_y + ix->drag_start_y) - active->abs_y;
             break;
-
+        }
         case UI_INTERACT_SCROLL_THUMB: {
             rect_t thumb;
-            if (get_scroll_thumb_rect(active, &thumb)) {
+            if (get_scroll_thumb_rect(active, &thumb)) 
+            {
                 i32 min_y       = active->abs_y;
                 i32 max_y       = active->abs_y + active->h - thumb.h;
                 i32 range       = max_y - min_y;
                 if (range <= 0) break;
-                i32 new_thumb_y = Clamp(min_y, (i32)(gc.mouse_y - ix->scroll_delta_y), max_y);
+                i32 new_thumb_y = (i32)(gc.mouse_y - ix->scroll_delta_y);
+                new_thumb_y = Clamp(min_y, new_thumb_y, max_y);
+
                 f32 ratio = (f32)(new_thumb_y - min_y) / (f32)range;
 
-                active->scroll_y =
-                    (i32)(ratio * active->max_scroll_y);
+                active->scroll_y = (i32)(ratio * active->max_scroll_y);
             }
             break;
         }
@@ -1213,6 +1224,7 @@ hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_re
         return HIT_REGION_BOTTOM_EDGE;
     }
     
+    #if 0 // only if moveable
     if (inside_rect(mx, my, &drag_handle)) 
     {
         if (drag_rect_out) {
@@ -1220,6 +1232,7 @@ hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_re
         }
         return HIT_REGION_DRAG_HANDLE;
     }
+    #endif
 
     if (get_scroll_thumb_rect(block, &scroll_handle) &&
         inside_rect(mx, my, &scroll_handle))
@@ -1252,50 +1265,48 @@ void ui_handle_mouse_button(ui_context_t *ctx)
         LOG_INFO("Block : %s clicked", target->title);
 
         u64 active_id = djb2_hash_append(target->id, "active");
-        if (!animation_get(active_id, &target->active_anim_t)) {
-            animation_start(active_id, 0.0f, 1.0f, 0.1f, EASE_IN_OUT_CUBIC);
-        }
+        animation_start(active_id, 0.0f, 1.0f, ANIMATION_TIME, EASE_IN_OUT_CUBIC);
 
         rect_t drag_rect = {0};
-        hit_region_t region = is_in_hit_region(target, gc.mouse_x, gc.mouse_y, &drag_rect);
+        hit_region_t region =
+            is_in_hit_region(target, gc.mouse_x, gc.mouse_y, &drag_rect);
 
         switch (region) {
         case HIT_REGION_LEFT_EDGE:
-            if (target->resizeable) 
-            {
-                ix->mode         = UI_INTERACT_RESIZE_LEFT;
+            if (target->resizeable) {
+                ix->mode = UI_INTERACT_RESIZE_LEFT;
                 ix->drag_start_x = target->abs_x - gc.mouse_x;
             }
             break;
         case HIT_REGION_RIGHT_EDGE:
             if (target->resizeable) {
-                ix->mode         = UI_INTERACT_RESIZE_RIGHT;
+                ix->mode = UI_INTERACT_RESIZE_RIGHT;
                 ix->drag_start_x = (target->abs_x + target->w) - gc.mouse_x;
             }
             break;
         case HIT_REGION_TOP_EDGE:
-                if (target->resizeable) {
-                    ix->mode         = UI_INTERACT_RESIZE_TOP;
-                    ix->drag_start_y = target->abs_y - gc.mouse_y;
-                }
-                break;
-            case HIT_REGION_BOTTOM_EDGE:
-                if (target->resizeable) {
-                    ix->mode         = UI_INTERACT_RESIZE_BOTTOM;
-                    ix->drag_start_y = (target->abs_y + target->h) - gc.mouse_y;
-                }
-                break;
-            case HIT_REGION_DRAG_HANDLE:
-                if (target->draggable) {
-                    ix->mode         = UI_INTERACT_DRAG_MOVE;
-                    ix->drag_start_x = target->abs_x - gc.mouse_x;
-                    ix->drag_start_y = target->abs_y - gc.mouse_y;
-                }
-                break;
+            if (target->resizeable) {
+                ix->mode = UI_INTERACT_RESIZE_TOP;
+                ix->drag_start_y = target->abs_y - gc.mouse_y;
+            }
+            break;
+        case HIT_REGION_BOTTOM_EDGE:
+            if (target->resizeable) {
+                ix->mode = UI_INTERACT_RESIZE_BOTTOM;
+                ix->drag_start_y = (target->abs_y + target->h) - gc.mouse_y;
+            }
+            break;
+        case HIT_REGION_DRAG_HANDLE:
+            if (target->draggable) {
+                ix->mode = UI_INTERACT_DRAG_MOVE;
+                ix->drag_start_x = target->abs_x - gc.mouse_x;
+                ix->drag_start_y = target->abs_y - gc.mouse_y;
+            }
+            break;
         case HIT_REGION_SCROLL_BAR: {
             if (target->scrollable) {
                 rect_t thumb;
-            ix->mode = UI_INTERACT_SCROLL_THUMB;
+                ix->mode = UI_INTERACT_SCROLL_THUMB;
                 if (get_scroll_thumb_rect(target, &thumb)) {
                     target->scroll_delta_y = gc.mouse_y - thumb.y;
                 }
@@ -1303,7 +1314,8 @@ void ui_handle_mouse_button(ui_context_t *ctx)
             break;
         }
         default:
-            ix->mode = target->draggable ? UI_INTERACT_DRAG_VALUE : UI_INTERACT_CLICKED;
+            ix->mode = target->draggable ? UI_INTERACT_DRAG_VALUE
+                                         : UI_INTERACT_CLICKED;
             break;
         }
         ui_block_save_state(target);
@@ -1316,11 +1328,18 @@ void ui_handle_mouse_button(ui_context_t *ctx)
         ui_block_t *active = ui_block_find_by_id(ctx, ix->active_id);
         if(active)
         {
+            u64 active_anim_id = djb2_hash_append(active->id, "active");
+            animation_start(active_anim_id, 1.0f, 0.0f, ANIMATION_TIME, EASE_IN_OUT_CUBIC);
             if(target && target->id == active->id)
             {
                 ix->released_id = active->id;
                 if (target->toggleable) {
                     target->toggled = !target->toggled;
+        u64 active_anim_id = djb2_hash_append(active->id, "toggle");
+        animation_start(active_anim_id, 
+                        active->toggled ? 0.0f : 1.0f,  // start from opposite
+                        active->toggled ? 1.0f : 0.0f,  // go to new state
+                        ANIMATION_TIME, EASE_IN_OUT_CUBIC);
                 }
                 LOG_INFO("Block : %s released", target->title);
             }
@@ -2127,7 +2146,7 @@ bool ui_button(ui_context_t *ctx, char *title)
 
     if(!animation_get(hot_id, &button->hot_anim_t))
     {
-        button->hot_anim_t = ui_is_hot(ctx, button);
+        button->hot_anim_t = ui_is_hot(ctx, button) ? 1.0f : 0.0f;
     }
 
     if(!animation_get(active_id, &button->active_anim_t))
@@ -2144,30 +2163,15 @@ bool ui_button(ui_context_t *ctx, char *title)
 
 void ui_update_toggle(ui_block_t *toggle)
 {
-    u64 hot_id = (u64)djb2_hash_append(toggle->id, "hot");
-    u64 active_id = (u64)djb2_hash_append(toggle->id, "active");
+    u64 hot_id    = djb2_hash_append(toggle->id, "hot");
+    /* had to seperate it because it was fighting with active animation time */
+    u64 active_id = djb2_hash_append(toggle->id, "toggle");
 
     if (!animation_get(hot_id, &toggle->hot_anim_t))
-    {
-        toggle->hot_anim_t = ui_is_hot(gc.ui_ctx, toggle) ? 1.0f : 0.0f;
-    }
+        toggle->hot_anim_t = ui_is_hot(gc.ui_ctx, toggle)?1.0f:0.0f;
 
     if (!animation_get(active_id, &toggle->active_anim_t))
-    {
         toggle->active_anim_t = toggle->toggled ? 1.0f : 0.0f;
-    }
-
-    static bool prev_toggled = false;
-    if (toggle->toggled != prev_toggled)
-    {
-        animation_start(active_id,
-                        toggle->active_anim_t,
-                        toggle->toggled ? 1.0f : 0.0f,
-                        0.1f,
-                        EASE_IN_OUT_CUBIC);
-        prev_toggled = toggle->toggled;
-    }
-
 }
 
 void ui_render_toggle(ui_block_t *block)
@@ -2339,13 +2343,12 @@ void ui_render_slider(ui_block_t *block)
 
     u64 handle_id = (u64)djb2_hash_append(block->id, "handle");
     
-
     if(hovered)
     {
         handle_color = HEX_TO_COLOR4(0x3149c7);
 
         if(just_entered)
-            animation_start(handle_id, 1.0f, 1.5f, 0.2f, EASE_IN_OUT_CUBIC);
+            animation_start(handle_id, 1.0f, 1.5f, ANIMATION_TIME, EASE_IN_OUT_CUBIC);
 
         animation_get(handle_id, &glow_scale);
     }
@@ -2377,14 +2380,13 @@ void ui_update_slider(ui_block_t *block)
 {
     block->value = Clamp(block->min_value, block->value, block->max_value);
     
-    if(ui_is_clicked(gc.ui_ctx, block))
+    if(ui_is_drag_value(gc.ui_ctx, block))
     {
         f32 normalized = ((f32)gc.mouse_x - block->abs_x) / (f32)block->w;
         normalized = Clamp(0.0f, normalized, 1.0f);
         
         block->value = LERP_F32(block->min_value, block->max_value, normalized);
     }
-
 }
 
 f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
@@ -2519,8 +2521,9 @@ f32 ui_knob(ui_context_t *ctx, char *title, f32 min, f32 max)
 
     u64 hot_id = (u64)djb2_hash_append(knob->id, "hot");
 
-    if (!animation_get(hot_id, &knob->hot_anim_t))
+    if (!animation_get(hot_id, &knob->hot_anim_t)){
         knob->hot_anim_t = ui_is_hot(ctx, knob);
+    }
 
     ui_add_child(ctx, knob);
 
