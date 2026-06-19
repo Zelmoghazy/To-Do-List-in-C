@@ -410,12 +410,30 @@ static inline void set_pixel_blend(image_view_t const *img, i32 x, i32 y, color4
     }
 }
 
+/*
+    TODO: make sure function calls are inlined or its going to be very slow
+    - Respects blending
+    - Respects current scissor
+ */
+inline void draw_pixel(image_view_t const *img, i32 x, i32 y, color4_t color) 
+{
+    if (!pixel_in_current_scissor(x, y)){
+        return;
+    }
+    set_pixel_blend(img, x, y, color);
+}
+
+
 // Used for anti-aliasing stuff
-static inline void set_pixel_weighted(image_view_t *img, i32 x, i32 y, color4_t color, u8 weight) 
+static inline void set_pixel_weighted(image_view_t const *img, i32 x, i32 y, color4_t color, u8 weight) 
 {
     color4_t weighted = color;
-    weighted.a = ClampTop(255, (color.a * weight) * INV_255);
-    set_pixel_blend(img, x, y, weighted);
+
+    // weighted.a = ClampTop(255, (color.a * weight) * INV_255);
+
+    // * 1/256 but much faster
+    weighted.a = ClampTop(255, (color.a * weight) >> 8);
+    draw_pixel(img, x, y, weighted);
 }
 
 static void plot_4_points(image_view_t *img, i32 cx, i32 cy, i32 x, i32 y, f32 opacity, color4_t color)
@@ -440,9 +458,32 @@ static void plot_4_points(image_view_t *img, i32 cx, i32 cy, i32 x, i32 y, f32 o
     }
 }
 
-inline void draw_pixel(image_view_t const *img, i32 x, i32 y, color4_t color) 
+static inline void emit_span(image_view_t *img, i32 y, i32 x0, i32 x1, color4_t color)
 {
-    set_pixel_blend(img, x, y, color);
+    if (y < 0 || y >= (i32)img->height) return;
+
+    // Scissor clamp — one clamp per span, not per pixel
+    if (scissor_enabled) {
+        if (y < current_scissor.y || 
+            y >= current_scissor.y + current_scissor.h) return;
+        x0 = MAX(x0, current_scissor.x);
+        x1 = MIN(x1, current_scissor.x + current_scissor.w - 1);
+    }
+
+    if (x0 > x1) return;
+
+    // Solid color fast path
+    if (IS_OPAQUE(color)) {
+        color4_t *row = &img->pixels[y * img->width];
+        for (i32 x = x0; x <= x1; x++)
+            row[x] = color;
+        return;
+    }
+
+    // Blend path
+    color4_t *row = &img->pixels[y * img->width];
+    for (i32 x = x0; x <= x1; x++)
+        row[x] = blend_pixel(row[x], color);
 }
 
 void clear_screen(image_view_t const *color_buf, color4_t const color)
@@ -722,7 +763,7 @@ void draw_triangle_filled_scanline(image_view_t *img, i32 y, i32 x1, i32 x2, col
         SWAP(x1, x2, i32);
     }
 
-    draw_hline(img, x1, x2, y, color);
+    draw_hline(img, y, x1, x2, color);
 }
 
 void draw_triangle_filled(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, i32 x3, i32 y3, color4_t color) 
@@ -889,7 +930,6 @@ void draw_circle_aa(image_view_t *img, i32 cx, i32 cy, f32 radius, color4_t colo
         plot_4_points(img, cx, cy, flr + 1, yi, frc, color);
     }
 }
-
 
 
 void draw_circle_filled_aa(image_view_t *img,
@@ -1467,6 +1507,13 @@ void draw_rounded_rectangle_filled_aa(image_view_t *img, i32 x1, i32 y1, i32 x2,
     draw_rect_solid(img, cx_left, cy_bottom + 1, cx_right, y2, color);
 }
 
+
+#define MAX_POLY_CORNERS 1024
+#define SPLINE           2.
+#define CUBIC            4.
+#define NEW_LOOP         3.
+#define END             -2.
+
 /*
     to check whether a point lies inside a polygon 
         - compare each side of the polygon to the Y (vertical) coordinate of the test point
@@ -1478,6 +1525,8 @@ void draw_rounded_rectangle_filled_aa(image_view_t *img, i32 x1, i32 y1, i32 x2,
  */
 void draw_filled_polygon(image_view_t *img, const i32 *vx, const i32 *vy, i32 n, color4_t color)
 {
+    assert(n < MAX_POLY_CORNERS);
+
     if (vx == NULL ||
         vy == NULL ||
         n < 3) 
@@ -1492,10 +1541,8 @@ void draw_filled_polygon(image_view_t *img, const i32 *vx, const i32 *vy, i32 n,
         if (vy[i] > maxy) maxy = vy[i];
     }
 
-    i32 *intersections = (i32 *)malloc(sizeof(i32) * n);
-    if (intersections == NULL) {
-        return;
-    }
+    // i32 *intersections = (i32 *)malloc(sizeof(i32) * n);
+    i32 intersections[MAX_POLY_CORNERS];
 
     for (i32 y = miny; y <= maxy; y++) 
     {
@@ -1567,8 +1614,6 @@ void draw_filled_polygon(image_view_t *img, const i32 *vx, const i32 *vy, i32 n,
             }
         }
     }
-
-    free(intersections);
 }
 
 void draw_thick_line(image_view_t *img, i32 x1, i32 y1, i32 x2, i32 y2, i32 width, color4_t color)
@@ -1656,11 +1701,7 @@ void draw_thick_aaline(image_view_t *img , i32 x1, i32 y1, i32 x2, i32 y2, i32 w
     draw_aaline(img, px[1], py[1], px[2], py[2], color);  // bottom edge
 }
 
-#define MAX_POLY_CORNERS 256
-#define SPLINE    2.
-#define CUBIC     4.
-#define NEW_LOOP  3.
-#define END      -2.
+
 
 /*
     F = (1.0 - t)^2 * p0.y + 2(1.0 - t) * t * p1.y + t^2 * p2.y
@@ -2109,15 +2150,6 @@ void clip_rect_to_current_scissor(i32 *x, i32 *y, i32 *width, i32 *height)
     *height = intersection.h ? intersection.h : 0;
 }
 
-void set_pixel_scissored(image_view_t const*img, i32 x, i32 y, color4_t color)
-{
-    if (!pixel_in_current_scissor(x, y)){
-        return;
-    }
-    
-    draw_pixel(img, x, y, color);
-}
-
 void draw_rect_scissored(image_view_t const *img, i32 x, i32 y, i32 width, i32 height, color4_t color)
 {
     if (!rect_intersects_current_scissor(x, y, width, height))
@@ -2133,25 +2165,57 @@ void draw_rect_scissored(image_view_t const *img, i32 x, i32 y, i32 width, i32 h
     draw_rect_solid_wh(img, clipped_x, clipped_y, clipped_width, clipped_height, color);
 }
 
-void draw_rounded_rect_scissored(image_view_t *img, i32 x, i32 y, i32 width, i32 height, i32 rad, color4_t color)
-{
-    if (!rect_intersects_current_scissor(x, y, width, height))
-        return;
-    
-    i32 clipped_x = x;
-    i32 clipped_y = y;
-    i32 clipped_width = width;
-    i32 clipped_height = height;
-    
-    clip_rect_to_current_scissor(&clipped_x, &clipped_y, &clipped_width, &clipped_height);
-    
-    draw_rounded_rectangle_filled_aa_wh(img, clipped_x, clipped_y, clipped_width, clipped_height, rad, color);
-}
-
 void clear_scissor_stack(void)
 {
     scissor_stack_size = 0;
     scissor_enabled = false;
+}
+
+// Clip a convex polygon against a single axis-aligned half-plane
+int clip_polygon_axis(
+    int *ix, int *iy, int in_count,
+    int *ox, int *oy,
+    int edge, int value, bool is_x, bool is_min)
+{
+    int out_count = 0;
+
+    for (int i = 0; i < in_count; i++) {
+        int ax = ix[i],          ay = iy[i];
+        int bx = ix[(i+1) % in_count], by = iy[(i+1) % in_count];
+
+        int a_val = is_x ? ax : ay;
+        int b_val = is_x ? bx : by;
+
+        bool a_in = is_min ? (a_val >= value) : (a_val <= value);
+        bool b_in = is_min ? (b_val >= value) : (b_val <= value);
+
+        if (a_in) {
+            ox[out_count] = ax;
+            oy[out_count] = ay;
+            out_count++;
+        }
+
+        if (a_in != b_in) {
+            // Compute intersection with the clip edge
+            float t = (float)(value - a_val) / (b_val - a_val);
+            ox[out_count] = is_x ? value : (int)(ax + t * (bx - ax));
+            oy[out_count] = is_x ? (int)(ay + t * (by - ay)) : value;
+            out_count++;
+        }
+    }
+    return out_count;
+}
+
+// Clip a polygon against the current scissor rect
+int clip_polygon_to_scissor(int *px, int *py, int count, int *ox, int *oy) {
+    int tx[16], ty[16], n;
+    
+    n = clip_polygon_axis(px, py, count, tx, ty, current_scissor.x, 0, true,  true);
+    n = clip_polygon_axis(tx, ty, n,     ox, oy, current_scissor.x + current_scissor.w, 0, true,  false);
+    n = clip_polygon_axis(ox, oy, n,     tx, ty, current_scissor.y, 0, false, true);
+    n = clip_polygon_axis(tx, ty, n,     ox, oy, current_scissor.y + current_scissor.h, 0, false, false);
+    
+    return n;
 }
 
 /* -------------------- Radial stuff -------------------- */
@@ -2200,7 +2264,7 @@ bool point_in_radial_segment(f32 px, f32 py, radial_layout_t *layout, radial_seg
         return false;
     }
     
-    bool in_angle = IN_RANGE_WRAP(pt.angle, seg_start, seg_end);
+    bool in_angle = RING_IN_RANGE_WRAP(pt.angle, seg_start, seg_end);
     
     return in_angle;
 }

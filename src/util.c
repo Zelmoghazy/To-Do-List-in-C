@@ -45,6 +45,75 @@ void log_color(char *text, char c)
     printf("\033[0m");
 }
 
+#include <stdio.h>
+#include <stdarg.h>
+
+typedef enum
+{
+    LOG_DEBUG,
+    LOG_INFO,
+    LOG_WARN,
+    LOG_ERROR
+} LogLevel;
+
+#ifdef LOG
+static inline void log_message(LogLevel level, const char *fmt, ...)
+{
+    const char *color;
+    const char *prefix;
+
+    switch (level)
+    {
+        case LOG_DEBUG:
+            color = "\033[0;34m";  // blue
+            prefix = "[DEBUG]";
+            break;
+
+        case LOG_INFO:
+            color = "\033[0;32m";  // green
+            prefix = "[INFO ]";
+            break;
+
+        case LOG_WARN:
+            color = "\033[1;33m";  // yellow
+            prefix = "[WARN ]";
+            break;
+
+        case LOG_ERROR:
+            color = "\033[1;31m";  // red
+            prefix = "[ERROR]";
+            break;
+
+        default:
+            color = "\033[0m";
+            prefix = "[?????]";
+            break;
+    }
+
+    printf("%s%s ", color, prefix);
+
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+
+    printf("\033[0m\n");
+}
+
+#define LOG_DEBUG(...) log_message(LOG_DEBUG, __VA_ARGS__)
+#define LOG_INFO(...)  log_message(LOG_INFO,  __VA_ARGS__)
+#define LOG_WARN(...)  log_message(LOG_WARN,  __VA_ARGS__)
+#define LOG_ERROR(...) log_message(LOG_ERROR, __VA_ARGS__)
+
+#else
+
+#define LOG_DEBUG(...) ((void)0)
+#define LOG_INFO(...)  ((void)0)
+#define LOG_WARN(...)  ((void)0)
+#define LOG_ERROR(...) ((void)0)
+
+#endif
+
 void log_error(i32 error_code, const char* file, i32 line)
 {
     if (error_code != 0){
@@ -115,6 +184,25 @@ void membroadcast(void *dst, const void *src, size_t element_size, size_t count)
     }
 }
 
+inline u32 swap_endian(u32 val) 
+{
+    /*
+        1- extract the bits
+        u8 b0 = (val >> 0) & 0xFF;
+        u8 b1 = (val >> 8) & 0xFF;
+        u8 b2 = (val >> 16) & 0xFF;
+        u8 b3 = (val >> 24) & 0xFF;
+
+        2- swap them
+        val = (b0 << 24) | (b1 << 16) | (b2 << 8) | (b3 << 0) ;
+     */
+
+    u32 swapped = ((val >> 24) & 0x000000FF) | ((val >> 8)  & 0x0000FF00) |
+                  ((val << 8)  & 0x00FF0000) | ((val << 24) & 0xFF000000);
+    return swapped;
+}
+
+
 #ifdef _WIN32
     __declspec(thread) u32 g_seed;
 #else
@@ -173,6 +261,16 @@ u32 unhash(u32 x)
 u32 djb2_hash(const char *str) 
 {
     u64 hash = 5381;
+    for (; *str != '\0'; str++) {
+        byte c = *str;
+        hash = ((hash << 5) + hash) ^ c;
+    }
+    return hash;
+}
+
+u32 djb2_hash_append(u32 seed, const char *str) 
+{
+    u64 hash = seed;
     for (; *str != '\0'; str++) {
         byte c = *str;
         hash = ((hash << 5) + hash) ^ c;
@@ -480,6 +578,57 @@ vec3f_t vec3f_refract(vec3f_t v, vec3f_t n, float e)
     return vec3f_add(r_out_perp, r_out_parallel);
 }
 
+vec4f_t vec4f_mat_mul(mat4x4_t const *m, vec4f_t const *v)
+{
+    return (vec4f_t){
+        .x = m->values[ 0] * v->x + m->values[ 1] * v->y + m->values[ 2] * v->z + m->values[ 3] * v->w,
+        .y = m->values[ 4] * v->x + m->values[ 5] * v->y + m->values[ 6] * v->z + m->values[ 7] * v->w,
+        .z = m->values[ 8] * v->x + m->values[ 9] * v->y + m->values[10] * v->z + m->values[11] * v->w,
+        .w = m->values[12] * v->x + m->values[13] * v->y + m->values[14] * v->z + m->values[15] * v->w
+    };
+}
+
+inline vec4f_t perspective_divide(vec4f_t v)
+{
+    v.x /= v.w;
+    v.y /= v.w;
+    v.z /= v.w;
+    return v;
+}
+
+inline vec4f_t vec4f_as_vector(vec3f_t const  *v)
+{
+    return (vec4f_t){v->x, v->y, v->z, 0.0f};
+}
+
+inline vec4f_t vecf4_as_point(vec3f_t const *v)
+{
+    return (vec4f_t){v->x, v->y, v->z, 1.0f};
+}
+
+inline vec4f_t vec4f_sub (vec4f_t const *v0, vec4f_t const  *v1)
+{
+    return (vec4f_t){v0->x - v1->x, v0->y - v1->y, v0->z - v1->z, v0->w - v1->w};
+}
+
+inline void vecf4_swap (vec4f_t *v0, vec4f_t *v1)
+{
+    vec4f_t const tmp = *v0;
+    *v0 = *v1;
+    *v1 = tmp;
+}
+
+inline f32 vec4f_det2D(vec4f_t const *v0, vec4f_t const* v1)
+{
+    return v0->x * v1->y - v0->y * v1->x;
+}
+
+inline f32 vec4f_dot(vec4f_t const *v0, vec4f_t const* v1)
+{
+    return v0->x * v1->x + v0->y * v1->y + v0->z * v1->z + v0->w * v1->w;
+}
+
+
 mat4x4_t mat4x4_mult(mat4x4_t const *m, mat4x4_t const *n)
 {
     f32 const m00 = m->values[0];
@@ -536,6 +685,43 @@ mat4x4_t mat4x4_mult(mat4x4_t const *m, mat4x4_t const *n)
     res.values[15] = m30*n03+m31*n13+m32*n23+m33*n33;  // res[3][3]
     
     return res;
+}
+
+f32 mat4x4_det(mat4x4_t const *m)
+{
+    f32 const m00 = m->values[0];
+    f32 const m01 = m->values[1];
+    f32 const m02 = m->values[2];
+    f32 const m03 = m->values[3];
+    f32 const m10 = m->values[4];
+    f32 const m11 = m->values[5];
+    f32 const m12 = m->values[6];
+    f32 const m13 = m->values[7];
+    f32 const m20 = m->values[8];
+    f32 const m21 = m->values[9];
+    f32 const m22 = m->values[10];
+    f32 const m23 = m->values[11];
+    f32 const m30 = m->values[12];
+    f32 const m31 = m->values[13];
+    f32 const m32 = m->values[14];
+    f32 const m33 = m->values[15];
+
+    // Pre-calculate 2x2 determinants for the bottom two rows
+    f32 const c00 = m22 * m33 - m23 * m32;
+    f32 const c01 = m21 * m33 - m23 * m31;
+    f32 const c02 = m21 * m32 - m22 * m31;
+    f32 const c03 = m20 * m33 - m23 * m30;
+    f32 const c04 = m20 * m32 - m22 * m30;
+    f32 const c05 = m20 * m31 - m21 * m30;
+
+    // Calculate 3x3 sub-determinants (cofactors for the top row)
+    f32 const det00 = m11 * c00 - m12 * c01 + m13 * c02;
+    f32 const det01 = m10 * c00 - m12 * c03 + m13 * c04;
+    f32 const det02 = m10 * c01 - m11 * c03 + m13 * c05;
+    f32 const det03 = m10 * c02 - m11 * c04 + m12 * c05;
+
+    // Final Laplace expansion using the top row
+    return m00 * det00 - m01 * det01 + m02 * det02 - m03 * det03;
 }
 
 mat4x4_t mat4x4_transpose(mat4x4_t const *m)
@@ -1883,7 +2069,7 @@ unsigned char* read_file(const char* font_path)
 {
     FILE *f = fopen(font_path, "rb");
     if (!f) {
-        printf("Failed to open font file: %s\n", font_path);
+        printf("Failed to open file: %s\n", font_path);
         return 0;
     }
     
@@ -1902,7 +2088,7 @@ unsigned char* read_file(const char* font_path)
     fclose(f);
     
     if (bytes_read != (size_t)size) {
-        printf("Failed to read complete font file\n");
+        printf("Failed to read complete file\n");
         free(buffer);
         buffer = NULL;
         return NULL;
@@ -2059,6 +2245,50 @@ path_kind_t path_kind(const char *path)
 
 /*  */
 
+#define Consume(data, type) (type *)consume_size(data, sizeof(type))
+
+typedef struct 
+{
+    u8* data;
+    u32 total_size;
+}Data;
+
+void* consume_size(Data* d, u32 size)
+{
+    void *result = 0;
+
+    if(d->total_size >= size)
+    {
+        result = d->data;
+        d->data = (u8*)d->data + size;
+        d->total_size -= size;
+    }
+    else
+    {
+        d->total_size = 0;
+    }
+
+    return result;
+}
+
+static i32
+is_letter(char c){
+    i32 result = 0;
+    if ((c >= 'A' && c <= 'Z') ||
+        (c >= 'a' && c <= 'z')){
+        result = 1;
+    }
+    return(result);
+}
+
+static char
+to_upper(char c){
+    if (c >= 'a' && c <= 'z'){
+        c += 'A' - 'a';
+    }
+    return(c);
+}
+
 void skip_whitespace_and_commas(const char **p)
 {
     while (**p && (isspace((unsigned char)**p) || **p == ','))
@@ -2080,7 +2310,7 @@ int parse_two_floats(const char **p, float *x, float *y)
     return parse_float(p, x) && parse_float(p, y);
 }
 
-/*  */
+/* Fuzzy Search */
 
 #if defined(_MSC_VER) || defined(_WIN32)
 #include <string.h>
@@ -2742,6 +2972,102 @@ bool event_activate(void *event)
     
     return true;
 #endif
+}
+
+
+#define EVENT_QUEUE_CAPACITY 256   /* must be a power of two */
+
+typedef enum {
+    EVT_KEY,
+    EVT_CURSOR,
+    EVT_MOUSE_BUTTON,
+    EVT_SCROLL,
+} EventType;
+
+typedef struct {
+    EventType type;
+    union {
+        struct { int key, scancode, action, mods; } key;
+        struct { double x, y;                     } cursor;
+        struct { int button, action, mods;         } mouse_button;
+        struct { double dx, dy;                    } scroll;
+    };
+} Event;
+
+typedef struct {
+    Event           buf[EVENT_QUEUE_CAPACITY];
+    volatile int    head;   /* next write position */
+    volatile int    tail;   /* next read  position */
+    mutex_handle_t  lock;
+cond_handle_t   not_empty; 
+} EventQueue;
+
+void eq_init(EventQueue *eq)
+{
+    eq->head = 0;
+    eq->tail = 0;
+    mutex_init(&eq->lock);
+   cond_init(&eq->not_empty);
+}
+
+void eq_destroy(EventQueue *eq)
+{
+    mutex_destroy(&eq->lock);
+cond_destroy(&eq->not_empty);
+}
+
+void eq_push(EventQueue *eq, const Event *e)
+{
+    mutex_lock(&eq->lock);
+
+    int next = (eq->head + 1) & (EVENT_QUEUE_CAPACITY - 1);
+    if (next != eq->tail) {          /* drop silently if full */
+        eq->buf[eq->head] = *e;
+        eq->head = next;
+cond_signal(&eq->not_empty); 
+    }
+
+    mutex_unlock(&eq->lock);
+}
+
+int eq_drain_wait(EventQueue *eq, Event *out)
+{
+    mutex_lock(&eq->lock);
+
+    while (eq->tail == eq->head) {
+        cond_wait(&eq->not_empty, &eq->lock);
+    }
+
+    int count = 0;
+    while (eq->tail != eq->head) {
+        out[count++] = eq->buf[eq->tail];
+        eq->tail = (eq->tail + 1) & (EVENT_QUEUE_CAPACITY - 1);
+    }
+
+    mutex_unlock(&eq->lock);
+    return count;
+}
+
+int eq_drain(EventQueue *eq, Event *out)
+{
+    mutex_lock(&eq->lock);
+
+    int count = 0;
+    while (eq->tail != eq->head) {
+        out[count++] = eq->buf[eq->tail];
+        eq->tail = (eq->tail + 1) & (EVENT_QUEUE_CAPACITY - 1);
+    }
+
+    mutex_unlock(&eq->lock);
+    return count;
+}
+
+bool eq_empty(EventQueue *eq)
+{
+    mutex_lock(&eq->lock);
+    bool empty = (eq->tail == eq->head);
+    mutex_unlock(&eq->lock);
+    return empty;
 }
 
 thread_func_ret_t thread_loop(thread_func_param_t param)

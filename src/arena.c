@@ -27,19 +27,28 @@ union align {
     long double ld;     // typically this one 
 };
 #define ALIGNED_PTR(ptr) (((size_t)(ptr))%(sizeof (union align)) == 0)
-#define ALIGN(n) (((n) + sizeof (union align) - 1)/(sizeof (union align)))*(sizeof (union align))
+#define ALIGN(n)         (((n) + sizeof (union align) - 1)/(sizeof (union align)))*(sizeof (union align))
 
 /*
     The arena structure represents a linked list of allocated memory "blocks".
 */
-typedef struct arena_t
+
+typedef struct arena_block_t
 {
-    struct arena_t *next;   // points to the head of the block
+    struct arena_block_t *next;   // points to the head of the block
     byte *used;             // points to the block's first free location (just past the used section).
     byte *capacity;         // points just past the end of the block.
+}arena_block_t;
+
+
+typedef struct arena_t{
+    arena_block_t *current_block; // Always try to allocate here first
+    arena_block_t *blocks_head;   // Head of all allocated blocks for freeing later
+    long mem_allocs;
 }arena_t;
 
-#define ARENA_FREE_SPACE(a) (a->capacity - a->used)
+
+#define ARENA_FREE_SPACE(a) ((a) ? (a)->capacity - (a)->used : 0)
 
 /* 
     The union header ensures that we start allocating memory 
@@ -47,11 +56,11 @@ typedef struct arena_t
 */
 union arena_header 
 {
-    arena_t b;
+    arena_block_t b;
     union align a;  // ensure we start allocating from a properly aligned address.
 };
 
-// skip the header
+// skip the header to reach usable pool bytes
 #define ARENA_MEM_BLOCK(p) (byte *)((union arena_header *)p + 1)
 
 // We keep a few free blocks on a free list emanating from "head"
@@ -60,7 +69,7 @@ union arena_header
 // initial arena structures and is shared between them
 static struct
 {
-    arena_t *head;
+    arena_block_t *head;
     int n;          // the number of blocks on the list.
 }arena_free_list;
 
@@ -69,9 +78,9 @@ static struct
 // reset a region of the arena not the entire arena 
 typedef struct arena_checkpoint_t
 {
-    arena_t *block;         // the currently used block
-    byte    *used;          // the point we wish to go back to 
-}arena_checkpoint;
+    arena_block_t *block;         // the currently used block
+    byte          *used;          // the point we wish to go back to 
+}arena_checkpoint_t;
 
 /*
     Allocate memory for the arena structure head.
@@ -84,9 +93,9 @@ arena_t* arena_new(void)
     arena_t* arena = malloc(sizeof(*arena));
     assert(arena);
     
-    arena->next     = NULL;
-    arena->used     = NULL;
-    arena->capacity = NULL;
+    arena->current_block = NULL;
+    arena->blocks_head   = NULL;
+    arena->mem_allocs    = 0;
     
     return arena;
 }
@@ -94,7 +103,10 @@ arena_t* arena_new(void)
 arena_t* arena_reserve(size_t nbytes)
 {
     arena_t* arena = arena_new();
-    (void)ARENA_ALLOC(arena, nbytes);
+    // Force allocation
+    void *tmp = ARENA_ALLOC(arena, nbytes);
+    (void)tmp;
+    // reset the pointers
     arena_reset(arena);
     return arena;
 }
@@ -117,19 +129,23 @@ void arena_delete(arena_t **ap)
 /* 
     Push a new memory block to the arena
  */
-void arena_push_block(arena_t *arena, arena_t *new_block, byte *cap)
+void arena_push_block(arena_t *arena, arena_block_t *new_block, byte *cap)
 {
-    // saves the arena state at the beginning of the new block.
-    // Remember: assigning structures copy all elements.
-    *new_block = *arena;
+    assert(arena);
+    assert(new_block);
+
+    // push the new block to the arena head.
+    new_block->next = arena->blocks_head;
+    arena->blocks_head = new_block;
 
     // [arena] -> [old_block]
     // [arena] -> [new_block] -> [old_block]
 
-    arena->next = new_block;
     // skip the header 
-    arena->used = ARENA_MEM_BLOCK(new_block);
-    arena->capacity = cap;
+    new_block->used = ARENA_MEM_BLOCK(new_block);
+    new_block->capacity = cap;
+
+    arena->current_block = new_block;
 }
 
 /* 
@@ -155,22 +171,24 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
 
     // If current block has enough space allocate from it and return
     // This path should occur 99% of the time pre-allocate the arena with enough memory.
-    if(nbytes <= ARENA_FREE_SPACE(arena))
+    if(arena->current_block && 
+       (nbytes <= ARENA_FREE_SPACE(arena->current_block)))
     {
-        arena->used += nbytes;
-        return arena->used - nbytes;
+        byte *ptr = arena->current_block->used;
+        arena->current_block->used += nbytes;
+        return ptr;
     }
 
     // Now if the current block doesnt have enough memory
     // we iterate other blocks in the list to check whether 
     // any of them has memory if not we allocate a new block
-    arena_t *current_block = arena->next;
-    arena_t *best_fit_block = NULL;
-    long best_fit_free_space = LONG_MAX;
+    arena_block_t *current_block   = arena->blocks_head;
+    arena_block_t *best_fit_block  = NULL;
+    long best_fit_free_space       = LONG_MAX;
 
     /* 
         Iterate all blocks in the list to find the one with 
-        most free space and allocate from it
+        first or most free space(best_fit) and allocate from it
      */
     while(current_block)
     {
@@ -197,7 +215,6 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
                         break;
                     }
                 }
-
             }
         }
         current_block = current_block->next;
@@ -206,14 +223,15 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
     // we found a space in any block
     if(best_fit_block)
     {
+        byte *ptr = best_fit_block->used;
         best_fit_block->used += nbytes;
-        return best_fit_block->used - nbytes;
+        return ptr;
     }
 
     // no existing block with enough space found, we have to allocate a new one
-    byte *cap = NULL;
-    arena_t* new_block = NULL;
-    arena_t* prev_block = NULL;
+    byte*          cap        = NULL;
+    arena_block_t* new_block  = NULL;
+    arena_block_t* prev_block = NULL;
     current_block = arena_free_list.head;
         
     // search the free blocks for any that has enough space (first fit)
@@ -247,12 +265,13 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
         new_block = malloc(new_block_size);
         assert(new_block);
         cap = (byte *)new_block + new_block_size;
+        arena->mem_allocs++;
     }
 
     arena_push_block(arena, new_block, cap);
-
-    arena->used += nbytes;
-    return arena->used - nbytes;
+    byte *ptr = new_block->used;
+    new_block->used += nbytes;
+    return ptr;
 }
 
 void *arena_calloc(arena_t *arena, long count, long nbytes, const char *file, int line) 
@@ -266,7 +285,7 @@ void *arena_calloc(arena_t *arena, long count, long nbytes, const char *file, in
 
 #define THRESHOLD 10
 
-void arena_free_block(arena_t *block)
+void arena_free_block(arena_block_t *block)
 {
     /*
         "freeblocks" accumulates free blocks from all arenas and thus could get large
@@ -281,14 +300,13 @@ void arena_free_block(arena_t *block)
     */
     if (arena_free_list.n < THRESHOLD) 
     {
-        block->next->next = arena_free_list.head;
-        arena_free_list.head = block->next; // make it the new head of the freelist
+        block->next = arena_free_list.head;
+        arena_free_list.head = block;
         arena_free_list.n++;
-        arena_free_list.head->capacity = block->capacity;
     } 
     else
     {
-        free(block->next);
+        free(block);
     }
 }
 
@@ -300,16 +318,14 @@ void arena_free_block(arena_t *block)
 void arena_reset(arena_t *arena)
 {
     assert(arena);
-
-    arena_t *current = arena;
-    
-    while (current->next) 
+    arena_block_t *current = arena->blocks_head;
+    while (current) 
     {
-        if (current->capacity != NULL) {
-            current->used = ARENA_MEM_BLOCK(current->next);
-        }
+        current->used = ARENA_MEM_BLOCK(current);
         current = current->next;
     }
+    // Restore primary targeting to the last block pushed (head of the list)
+    arena->current_block = arena->blocks_head; 
 }
 /* 
     An arena is deallocated by adding its blocks to the list of free blocks,
@@ -329,36 +345,33 @@ void arena_free(arena_t *arena)
      */
 
     assert(arena);
+    arena_block_t *current = arena->blocks_head;
 
-    while (arena->next) 
+    while (current) 
     {
         // save information of the block getting deleted
-        arena_t freed_block_state = *arena->next;
+        arena_block_t *next_block = current->next;
 
         // delete the block
-        arena_free_block(arena);
+        arena_free_block(current);
 
         // get back the information to continue deleting the rest
-        *arena = freed_block_state;
+        current = next_block;
     }
 
     // should get set automatically by the last chunk
-	assert(arena->capacity == NULL);
-	assert(arena->used == NULL);
+arena->blocks_head = NULL;
+    arena->current_block = NULL;
 }
 
-
-
-/* arena_checkpoint_t arena_save(arena_t *arena)
+arena_checkpoint_t arena_save(arena_t *arena)
 {
     assert(arena);
-
-    // until I figure it out save only when one block is allocated
-    assert(arena->next->next == NULL); 
-
     arena_checkpoint_t checkpoint;
-    checkpoint.block = arena;
-    checkpoint.used = arena->used;
+    
+    // Record where we are currently writing out data
+    checkpoint.block = arena->current_block;
+    checkpoint.used  = arena->current_block ? arena->current_block->used : NULL;
     
     return checkpoint;
 }
@@ -366,16 +379,28 @@ void arena_free(arena_t *arena)
 void arena_restore(arena_t *arena, arena_checkpoint_t checkpoint) 
 {
     assert(arena);
-    assert(arena->next->next == NULL); 
 
-    assert(checkpoint.block);
-    
+    // If the checkpointed block is NULL, it means we are reverting all the way 
+    // back to the start of the very first block (entire arena reset)
+    if (!checkpoint.block) {
+        arena_reset(arena);
+        return;
+    }
+
+    // 1. Roll back the write cursor inside the targeted checkpoint block
     assert(checkpoint.used >= ARENA_MEM_BLOCK(checkpoint.block));
     assert(checkpoint.used <= checkpoint.block->capacity);
-    
-    // Restore the arena head to point to the checkpointed block
-    *arena = *checkpoint.block;
-    
-    // Restore the used pointer to the checkpointed position
-    arena->used = checkpoint.used;
-} */
+    checkpoint.block->used = checkpoint.used;
+
+    // Because new blocks are pushed to the HEAD of the list, these "newer" 
+    // blocks exist in the chain BEFORE the checkpoint block.
+    arena_block_t *current = arena->blocks_head;
+    while (current && current != checkpoint.block) 
+    {
+        // Reset this block's cursor back to its absolute beginning (just past its header)
+        current->used = ARENA_MEM_BLOCK(current);
+        current = current->next;
+    }
+
+    arena->current_block = checkpoint.block;
+}

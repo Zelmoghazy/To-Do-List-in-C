@@ -78,6 +78,15 @@ typedef struct
     float min_x, min_y, max_x, max_y;
 } path_data_t;
 
+
+typedef struct {
+    float x,y,z;     // Position in space
+    float vx,vy,vz;  // Velocity vector
+    float r,g,b;     // Color of particle
+    float life;      // Life of particle (1.0 = newborn, < 0.0 = dead)
+    int   active;    // Tells if this particle is active
+} PARTICLE;
+
 #define A(c)           ((u8) ((c) >> 24))
 #define R(c)           ((u8) ((c) >> 16))
 #define G(c)           ((u8) ((c) >>  8))
@@ -181,7 +190,7 @@ inline void set_pixel(image_view_t const *img, i32 x, i32 y, color4_t color);
 inline color4_t get_pixel(image_view_t const *img, i32 x, i32 y);
 inline color4_t blend_pixel(color4_t dst, color4_t src);
 inline void set_pixel_blend(image_view_t const *img, i32 x, i32 y, color4_t color);
-inline void set_pixel_weighted(image_view_t *img, i32 x, i32 y, color4_t color, u8 weight);
+inline void set_pixel_weighted(image_view_t const *img, i32 x, i32 y, color4_t color, u8 weight);
 void draw_pixel(image_view_t const *img, i32 x, i32 y, color4_t color);
 void clear_screen(image_view_t const *color_buf, color4_t const color);
 void clear_screen_radial_gradient(image_view_t const *color_buf,
@@ -226,9 +235,7 @@ bool pop_scissor();
 bool pixel_in_current_scissor(i32 x, i32 y);
 bool rect_intersects_current_scissor(i32 x, i32 y, i32 width, i32 height);
 void clip_rect_to_current_scissor(i32 *x, i32 *y, i32 *width, i32 *height);
-void set_pixel_scissored(image_view_t const*img, i32 x, i32 y, color4_t color);
 void draw_rect_scissored(image_view_t const *img, i32 x, i32 y, i32 width, i32 height, color4_t color);
-void draw_rounded_rect_scissored(image_view_t *img, i32 x, i32 y, i32 width, i32 height, i32 rad, color4_t color);
 void clear_scissor_stack();
 
 void polar_to_cartesian(polar_t polar, f32 center_x, f32 center_y, f32 scale_x, f32 scale_y, f32 *out_x, f32 *out_y);

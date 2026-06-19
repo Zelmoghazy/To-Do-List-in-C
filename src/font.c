@@ -6,25 +6,7 @@
 // Load font from file
 font_tt* load_font_from_file(const char *filename, f32 font_size)
 {
-    FILE *file = fopen(filename, "rb");
-    if (!file) {
-        fprintf(stderr, "Error : Failed to open font file: %s\n", filename);
-        return NULL;
-    }
-    
-    fseek(file, 0, SEEK_END);
-    long size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    
-    u8 *buffer = malloc(size);
-    if (!buffer) {
-        fclose(file);
-        return NULL;
-    }
-    
-    fread(buffer, 1, size, file);
-    fclose(file);
-    
+    u8 *buffer = CHECK_PTR(read_file(filename));
     return init_font_tt(buffer, font_size);
 }
 
@@ -46,11 +28,28 @@ font_tt* init_font_tt(u8 *font_buffer, f32 font_size)
     font->scale = stbtt_ScaleForPixelHeight(&font->info, font_size);
     stbtt_GetFontVMetrics(&font->info, &font->ascent, &font->descent, &font->line_gap);
     
-    font->ascent = (int)(font->ascent * font->scale);
-    font->descent = (int)(font->descent * font->scale);
-    font->line_gap = (int)(font->line_gap * font->scale);
+    font->ascent    = (int)(font->ascent * font->scale);
+    font->descent   = (int)(font->descent * font->scale);
+    font->line_gap  = (int)(font->line_gap * font->scale);
     
     return font;
+}
+
+void free_font(font_tt *font)
+{
+    if (!font) return;
+    
+    for (int i = 0; i < GLYPH_CACHE_SIZE; i++) {
+        if (font->cache_valid[i] && font->glyph_cache[i].bitmap) {
+            free(font->glyph_cache[i].bitmap);
+        }
+    }
+    
+    if (font->font_buffer) {
+        free(font->font_buffer);
+    }
+    
+    free(font);
 }
 
 glyph_info_t* get_glyph(font_tt *font, u32 codepoint)
@@ -104,56 +103,14 @@ glyph_info_t* get_glyph(font_tt *font, u32 codepoint)
     return glyph;
 }
 
-glyph_info_t *render_glyph_to_buffer_tt(font_tt *font, u32 codepoint, 
-                           image_view_t *color_buf,
-                           u32 dst_x, u32 dst_y, color4_t color)
-{
-    glyph_info_t *glyph = get_glyph(font, codepoint);
-    if (!glyph || !glyph->bitmap){
-        return NULL;
-    }
-    
-    int render_x = (int)dst_x + (int)glyph->bearing_x;
-    int render_y = (int)dst_y + font->ascent + (int)glyph->bearing_y;
-    
-    rect_t glyph_rect = { render_x, render_y, (int)glyph->w, (int)glyph->h };
-    rect_t buffer_rect = { 0, 0, (int)color_buf->width, (int)color_buf->height };
-
-    // bound checking
-    rect_t clipped = intersect_rects(&glyph_rect, &buffer_rect);
-
-    int x_start = clipped.x;
-    int y_start = clipped.y;
-
-    int x_end = clipped.x + clipped.w;
-    int y_end = clipped.y + clipped.h;
-
-    for (int y = y_start; y < y_end; y++) 
-    {
-        int src_y = (int)(y - render_y);
-        for (int x = x_start; x < x_end; x++) 
-        {
-            int src_x = (int)(x - render_x);
-            u8 alpha = glyph->bitmap[src_y * glyph->w + src_x];
-            
-            if (alpha > 0) 
-            {
-                color.a = alpha;
-                draw_pixel(color_buf, x, y, color);
-            }
-        }
-    }
-    return glyph;
-}
-
-void render_glyph_to_buffer_tt_scissored(font_tt *font, u32 codepoint, 
-                                         image_view_t  *color_buf,
+glyph_info_t* render_glyph_to_buffer_tt(font_tt *font, u32 codepoint, 
+                                         image_view_t  const *color_buf,
                                          u32 dst_x, u32 dst_y, color4_t color)
 {
     glyph_info_t *glyph = get_glyph(font, codepoint);
 
     if (!glyph || !glyph->bitmap){
-        return;
+        return NULL;
     }
     
     int render_x = (int)dst_x + (int)glyph->bearing_x;
@@ -164,10 +121,14 @@ void render_glyph_to_buffer_tt_scissored(font_tt *font, u32 codepoint,
 
     // Intersect all three
     rect_t clipped = intersect_rects(&glyph_rect, &buffer_rect);
-    clipped = intersect_rects(&clipped, &current_scissor);
+
+    // respect current scissor if available
+    if(scissor_enabled){
+        clipped = intersect_rects(&clipped, &current_scissor);
+    }
 
     if (clipped.w <= 0 || clipped.h <= 0)
-        return;
+        return NULL;
 
     int x_start = clipped.x;
     int y_start = clipped.y;
@@ -187,10 +148,11 @@ void render_glyph_to_buffer_tt_scissored(font_tt *font, u32 codepoint,
             if (alpha > 0) 
             {
                 color.a = alpha;
-                set_pixel_scissored(color_buf, x, y, color);
+                draw_pixel(color_buf, x, y, color);
             }
         }
     }
+    return glyph;
 }
 
 void render_text_tt(image_view_t *color_buf, rendered_text_tt *text)
@@ -237,49 +199,6 @@ void render_text_tt(image_view_t *color_buf, rendered_text_tt *text)
         if (glyph) {
             x += glyph->advance ;
         }
-    }
-}
-
-void render_text_tt_scissored(image_view_t *color_buf, rendered_text_tt *text)
-{
-    if (!text || !text->string || !text->font){
-        return;
-    }
-    
-    char *string = text->string;
-    f32 x = text->pos.x;
-    f32 y = text->pos.y;
-    f32 original_x = x;
-    
-    i32 line_height = get_line_height(text->font);
-    
-    while (*string) 
-    {
-        if (*string == '\n') 
-        {
-            y += line_height;
-            x = original_x;
-            string++;
-            continue;
-        }
-        
-        if (*string == '\t') 
-        {
-            glyph_info_t *space_glyph = get_glyph(text->font, ' ');
-            if (space_glyph) {
-                x += space_glyph->advance * TAB_SIZE;
-            }
-            string++;
-            continue;
-        }
-        
-        render_glyph_to_buffer_tt_scissored(text->font, *string, color_buf, (u32)x, (u32)y, text->color);
-        
-        glyph_info_t *glyph = get_glyph(text->font, *string);
-        if (glyph) {
-            x += glyph->advance ;
-        }
-        string++;
     }
 }
 
@@ -750,7 +669,8 @@ float get_string_width_unicode(font_tt *font, const char *utf8_str, float scale)
     utf8_decoder_init(&decoder, utf8_str);
     
     u32 wc;
-    while (utf8_decode_next(&decoder, &wc)) {
+    while (utf8_decode_next(&decoder, &wc)) 
+    {
         if (wc == '\n') {
             break;
         }
@@ -818,23 +738,6 @@ size_t utf8_strlen(const char *utf8_str)
     }
     
     return count;
-}
-
-void free_font(font_tt *font)
-{
-    if (!font) return;
-    
-    for (int i = 0; i < GLYPH_CACHE_SIZE; i++) {
-        if (font->cache_valid[i] && font->glyph_cache[i].bitmap) {
-            free(font->glyph_cache[i].bitmap);
-        }
-    }
-    
-    if (font->font_buffer) {
-        free(font->font_buffer);
-    }
-    
-    free(font);
 }
 
 path_data_t* load_glyph_curves(font_tt *font, const char *font_path, char character) 

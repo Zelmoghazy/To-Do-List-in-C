@@ -1,4 +1,16 @@
+/*
+    TODO:
+    - [] Extract interaction states from each block and make it universal
+        - we cannot really interact with more than one thing at a time and it simplifies things
+    - [] make sure NO_LAYOUT allow arbitrary layouts and successfully bypass the layout pass (cursor)
+    - [] command queues and integrate the opengl renderer so I can switch between them
+    - [] cache frames to only rerender stuff that changes
+    - [] revise cached stuff between frames do I really need them ?
+    - [] fix scrollbar interaction
+
+ */
 #define WIN32_LEAN_AND_MEAN 
+#define VC_EXTRALEAN
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -10,10 +22,6 @@
 #define STB_IMAGE_IMPLEMENTATION
     #include "./external/include/stb_image.h"
 #undef STB_IMAGE_IMPLEMENTATION
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-    #include "./external/include/stb_image_write.h"
-#undef STB_IMAGE_WRITE_IMPLEMENTATION
 
 #define STB_DS_IMPLEMENTATION
     #include "./external/include/stb_ds.h"
@@ -28,31 +36,54 @@
 #include "./include/font.h"
 #include "./include/todo.h"
 
+#include "./src/util.c"
+#include "./src/arena.c"
+#include "./src/base_graphics.c"
+#include "./src/font.c"
+#include "./src/todo.c"
+
+__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;// Optimus: force switch to discrete GPU
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;//AMD
+
 #define FRAME_HISTORY_SIZE  64
 #define BUFFER_SIZE         512
 #define MAX_BLOCKS          256
 
 /*
     Stuff that we wish to retain between frames
+    per block
 */
 typedef struct 
 {
-    i32 scroll_start_x, scroll_start_y;
     i32 scroll_x, scroll_y;
-
-    f32 drag_start_x, drag_start_y;
-
     f32  value;
-    bool hover;
-    bool clicked;
     bool toggled;
-    bool released;
-    bool dragging;
-    bool resizing;
-    bool resize_left, resize_right, resize_top, resize_bottom;
 } ui_block_state_t;
 
 typedef struct { char *key; ui_block_state_t value; } ui_block_map_t;
+
+typedef enum {
+    UI_INTERACT_NONE,
+    UI_INTERACT_HOVER,
+    UI_INTERACT_DRAG_VALUE,   
+    UI_INTERACT_DRAG_MOVE,    
+    UI_INTERACT_RESIZE_LEFT,
+    UI_INTERACT_RESIZE_RIGHT,
+    UI_INTERACT_RESIZE_TOP,
+    UI_INTERACT_RESIZE_BOTTOM,
+    UI_INTERACT_SCROLL_THUMB,
+    UI_INTERACT_CLICKED,
+} ui_interact_mode_t;
+
+typedef struct {
+    u64                 hot_id;        
+    u64                 active_id;     
+    u64                 released_id;
+    ui_interact_mode_t  mode;
+    f32                 drag_start_x;
+    f32                 drag_start_y;
+    f32                 scroll_delta_y;
+} ui_interaction_t;
 
 typedef enum
 {
@@ -69,6 +100,8 @@ typedef enum
     HIT_REGION_TOP_EDGE,
     HIT_REGION_BOTTOM_EDGE,
     HIT_REGION_DRAG_HANDLE,
+    HIT_REGION_SCROLL_BAR,
+    HIT_REGION_COUNT,
 } hit_region_t;
 
 /*
@@ -109,7 +142,7 @@ typedef struct ui_block_t
     // stuff inside the panel should only be drawn inside the panel
     scissor_region_t scissor_region;
 
-    i32 scroll_start_x, scroll_start_y;
+    i32 scroll_delta_x, scroll_delta_y;
     i32 scroll_x, scroll_y; 
     i32 max_scroll_x, max_scroll_y;
     
@@ -122,26 +155,16 @@ typedef struct ui_block_t
     bool enabled;
     bool visible;
 
-    bool hover;
-
     bool clickable;
-    bool clicked;
-    bool released;
 
     bool scrollable;
 
     bool draggable;
-    bool dragging;
 
     bool resizeable;
-    bool resizing;
-    bool resize_left, resize_right, resize_top, resize_bottom;
 
     bool toggleable;
     bool toggled;
-
-    f32 drag_start_x, drag_start_y;     // used for anchoring stuff to mouse pos
-    f32 drag_delta_x, drag_delta_y;     // all requiring relative motion
 
     f32 value;
     f32 min_value;
@@ -188,7 +211,7 @@ typedef struct ui_block_t
 typedef struct
 {
     ui_block_t *root_block;
-    ui_block_t *current_block;          
+    ui_block_t *current_block;
 
     ui_block_t *modal_block;
     u32 modal_active;
@@ -200,8 +223,7 @@ typedef struct
     ui_block_t **layout_order;
     i32 layout_count;
 
-    u32 hot_block_id;
-    u32 active_block_id;
+    ui_interaction_t interaction;
 } ui_context_t;
 
 #define TEXT_BUFFER_MAX 512
@@ -343,7 +365,42 @@ ui_block_t *ui_block_find_by_id(ui_context_t *ctx, u32 block_id);
 bool is_in_drag_handle(ui_block_t *block, i32 mouse_x, i32 mouse_y, rect_t *drag_rect);
 hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_rect_out);
 void ui_calculate_absolute_positions(ui_context_t *ctx);
+bool get_scroll_thumb_rect(ui_block_t *block, rect_t *out);
 
+bool manipulator_axis_x(u32* x, u32 rad)
+{
+    static bool dragging = false;
+
+    u32 left  = (*x > rad) ? (*x - rad) : 0;
+    u32 right = *x + rad;
+
+    if (dragging)
+    {
+        draw_rect_outline(&gc.draw_buffer, left, 0, right, gc.screen_height, COLOR_BLUE);
+
+        if (gc.left_button_down)
+        {
+            *x = (u32)gc.mouse_x;
+            return true;
+        }
+        else
+        {
+            dragging = false;
+        }
+    }
+    else if (Inside((u32)gc.mouse_x, left, right))
+    {
+        draw_rect_outline(&gc.draw_buffer, left, 0, right, gc.screen_height, COLOR_BLUE);
+
+        if (gc.left_button_down)
+        {
+            dragging = true;
+            return true;
+        }
+    }
+
+    return false;
+}
 void set_dark_mode(GLFWwindow *window)
 {
     #ifdef _WIN32
@@ -418,6 +475,7 @@ void reset_input_for_frame(void)
         gc.key_just_pressed[i] = false;
     }
     gc.input_char_count = 0;
+    gc.ui_ctx->interaction.released_id = 0; 
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
@@ -436,7 +494,7 @@ void error_callback(int error, const char* description)
 
 void window_refresh_callback(GLFWwindow* window)
 {
-    glfwSwapBuffers(window);
+    // glfwSwapBuffers(window);
 }
 
 void drop_callback(GLFWwindow* window, int count, const char** paths) 
@@ -526,7 +584,8 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
 
     if (action == GLFW_PRESS || action == GLFW_REPEAT) 
     {
-        switch (key) {
+        switch (key) 
+        {
             case GLFW_KEY_BACKSPACE:
                 break;
             case GLFW_KEY_ENTER:
@@ -544,10 +603,15 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
                 break;
             case GLFW_KEY_F7:
                 gc.dock = !gc.dock;
-                if(gc.dock){
-                    animation_start((u64)&gc.side_panel_x, gc.side_panel_x, 0.5f, 1, EASE_IN_OUT_CUBIC);
-                }else{
-                    animation_start((u64)&gc.side_panel_x, gc.side_panel_x, 0.01f, 1, EASE_IN_OUT_CUBIC);
+                if(gc.dock)
+                {
+                    animation_start((u64)&gc.side_panel_x, gc.side_panel_x,
+                                    0.5f, 2, EASE_IN_OUT_CUBIC);
+                }
+                else
+                {
+                    animation_start((u64)&gc.side_panel_x, gc.side_panel_x, 
+                                    0.01f, 2, EASE_IN_OUT_CUBIC);
                 }
                 break;
             case GLFW_KEY_W:
@@ -675,19 +739,6 @@ ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width
     ui_block_load_state(block);
 
     // if not hot just reset all interaction states
-    if(block->id != ctx->hot_block_id)
-    {
-        block->hover = false;
-        block->released = false;
-    }
-
-    if(block->id != ctx->active_block_id)
-    {
-        block->dragging = false;
-        block->resizing = false;
-        block->clicked = false;
-    }
-    
     return block;
 }
 
@@ -803,7 +854,7 @@ void ui_set_pixel_in_block(ui_block_t *block, i32 block_x, i32 block_y, color4_t
 {
     i32 screen_x, screen_y;
     ui_block_to_screen_coords(block, block_x, block_y, &screen_x, &screen_y);
-    set_pixel_scissored(&gc.draw_buffer, screen_x, screen_y, color);
+    draw_pixel(&gc.draw_buffer, screen_x, screen_y, color);
 }
 
 void ui_draw_rect_in_block(ui_block_t *block, i32 block_x, i32 block_y, u32 width, u32 height, color4_t color)
@@ -820,7 +871,7 @@ void ui_draw_rounded_rect_in_block(ui_block_t *block, i32 block_x, i32 block_y, 
     i32 screen_x, screen_y;
     ui_block_to_screen_coords(block, block_x, block_y,
                                      &screen_x, &screen_y);
-    draw_rounded_rect_scissored(&gc.draw_buffer, screen_x, screen_y,
+    draw_rounded_rectangle_filled_aa_wh(&gc.draw_buffer, screen_x, screen_y,
                                  width, height, 25, color);
 }
 
@@ -833,7 +884,7 @@ void ui_render_text_in_block(ui_block_t *block)
     block->text.pos.x = screen_x;
     block->text.pos.y = screen_y;
 
-    render_text_tt_scissored(&gc.draw_buffer, &block->text);
+    render_text_tt(&gc.draw_buffer, &block->text);
 }
 
 void ui_draw_block_background(ui_block_t *block)
@@ -892,6 +943,15 @@ void ui_draw_block_background(ui_block_t *block)
                             block->border_width,
                             block->h,
                             block->border_color);
+
+// draw_rounded_rectangle_filled_aa(&gc.draw_buffer, 
+//                                  block->abs_x + block->border_width, 
+//                                  block->abs_y + block->border_width, 
+//                                  block->abs_x + block->w - block->border_width, 
+//                                  block->abs_y + block->h - block->border_width,
+//                                  10.0f, // radius
+//                                  block->border_color);
+
     }
 }
 
@@ -944,62 +1004,163 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
         }
     }
 
-    ui_block_t *target = ui_block_at_point(ctx, (i32)gc.mouse_x, (i32)gc.mouse_y);
+    ui_block_t *hovered = ui_block_at_point(ctx, (i32)gc.mouse_x, (i32)gc.mouse_y);
+    ui_interaction_t *ix = &ctx->interaction;
 
     /* Hovered */    
-    if(target && target->visible)
+    if(hovered && hovered->visible)
     {
-        ctx->hot_block_id = target->id;
+        ix->hot_id = hovered->id;
 
         // was not hot last frame
-        if(!target->hover)
+        if(ix->hot_id != hovered->id)
         {
-            target->hover = true;
+            ix->hot_id = hovered->id;
+            u64 hot_id = djb2_hash_append(hovered->id, "hot");
             // start hot animation
-            if(!animation_get((u64)&target->hot_anim_t, &target->hot_anim_t)){
-                animation_start((u64)&target->hot_anim_t, 0.0f, 1.0f, 0.2f, EASE_IN_OUT_CUBIC);
+            if(!animation_get(hot_id, &hovered->hot_anim_t)){
+                animation_start(hot_id, 0.0f, 1.0f, 0.2f, EASE_IN_OUT_CUBIC);
             }
-            ui_block_save_state(target);
         }
 
         glfwSetCursor(gc.window, gc.hand_cursor);
     }
     else
     {
+        ix->hot_id = 0;
         glfwSetCursor(gc.window, gc.regular_cursor);
-        ctx->hot_block_id = 0;
+    }
+
+    /* 
+        there no ongoing interaction with an active id
+        just run update on hovered
+     */
+    if (!ix->active_id) 
+    {
+        if (hovered && hovered->visible) 
+        {
+            // do custom update if required
+            if (hovered->custom_update) {
+                hovered->custom_update(hovered);
+                ui_block_save_state(hovered);
+            }
+        }
+        return;
     }
 
     // update active block even if its not hovered
-    if(ctx->active_block_id)
+    ui_block_t *active = ui_block_find_by_id(ctx, ix->active_id);
+    if(!active)
     {
-        ui_block_t *active = ui_block_find_by_id(ctx, ctx->active_block_id);
-        if(active)
-        {
-            // if its draggable 
-            if(active->draggable && active->dragging)
-            {
-                f32 drag_delta = delta_x + delta_y;
-                active->value += drag_delta * ui_drag_velocity_factor(active);
-                active->value = Clamp(active->min_value, active->value, active->max_value);
-            }
-            if(active->custom_update)
-            {
-                active->custom_update(active);
-            }
+        ix->active_id = 0; 
+        ix->mode = UI_INTERACT_NONE; 
+        return;
+    }
 
-            ui_block_save_state(active);
-        }
-    }
-    else if (target && target->visible)
+    switch(ix->mode)
     {
-        // do custom update if required
-        if(target->custom_update)
+        case UI_INTERACT_DRAG_VALUE:
         {
-            target->custom_update(target);
-            ui_block_save_state(target);
+            f32 drag_delta = delta_x + delta_y;
+            active->value += drag_delta * ui_drag_velocity_factor(active);
+            active->value = Clamp(active->min_value, active->value, active->max_value);
+            break;
         }
+        case UI_INTERACT_DRAG_MOVE:
+        {
+            active->abs_x = (i32)(gc.mouse_x + ix->drag_start_x);
+            active->abs_y = (i32)(gc.mouse_y + ix->drag_start_y);
+            break;
+        }
+        case UI_INTERACT_RESIZE_LEFT: {
+            i32 new_x   = (i32)(gc.mouse_x + ix->drag_start_x);
+            active->w  += active->abs_x - new_x;
+            active->abs_x = new_x;
+            break;
+        }
+        case UI_INTERACT_RESIZE_RIGHT:
+            active->w = (i32)(gc.mouse_x + ix->drag_start_x) - active->abs_x;
+            break;
+        case UI_INTERACT_RESIZE_TOP: {
+            i32 new_y   = (i32)(gc.mouse_y + ix->drag_start_y);
+            active->h  += active->abs_y - new_y;
+            active->abs_y = new_y;
+            break;
+        }
+        case UI_INTERACT_RESIZE_BOTTOM:
+            active->h = (i32)(gc.mouse_y + ix->drag_start_y) - active->abs_y;
+            break;
+
+        case UI_INTERACT_SCROLL_THUMB: {
+            rect_t thumb;
+            if (get_scroll_thumb_rect(active, &thumb)) {
+                i32 min_y       = active->abs_y;
+                i32 max_y       = active->abs_y + active->h - thumb.h;
+                i32 range       = max_y - min_y;
+                if (range <= 0) break;
+                i32 new_thumb_y = Clamp(min_y, (i32)(gc.mouse_y - ix->scroll_delta_y), max_y);
+                f32 ratio = (f32)(new_thumb_y - min_y) / (f32)range;
+
+                active->scroll_y =
+                    (i32)(ratio * active->max_scroll_y);
+            }
+            break;
+        }
+        default:break;
     }
+
+    if(active->custom_update)
+    {
+        active->custom_update(active);
+    }
+
+    ui_block_save_state(active);
+}
+  
+
+bool get_scroll_thumb_rect(ui_block_t *block, rect_t *out)
+{
+    if (block->max_scroll_y <= 0)
+        return false;
+
+    i32 gap = block->border_width * 4;
+    i32 scroll_thumb_width = block->border_width * 2;
+
+    i32 scroll_bar_x = block->abs_x + block->w - gap + block->border_width;
+
+    i32 content_height = block->max_scroll_y + block->h;
+
+    if (content_height <= 0)
+        return false;
+
+    f32 visible_ratio =
+        Clamp((f32)block->h / (f32)content_height, 0.1f, 1.0f);
+
+    i32 scroll_thumb_height = (i32)(block->h * visible_ratio);
+    scroll_thumb_height = MAX(scroll_thumb_height,
+                              scroll_thumb_width * 2);
+
+    i32 scroll_bar_min_y = block->abs_y;
+    i32 scroll_bar_max_y =
+        scroll_bar_min_y + block->h - scroll_thumb_height;
+
+    f32 scroll_bar_ratio =
+        fabsf((f32)block->scroll_y /
+              (f32)block->max_scroll_y);
+
+    i32 scroll_bar_y =
+        LERP_F32(scroll_bar_min_y,
+                 scroll_bar_max_y,
+                 scroll_bar_ratio);
+
+    *out = (rect_t){
+        .x = scroll_bar_x,
+        .y = scroll_bar_y,
+        .w = scroll_thumb_width,
+        .h = scroll_thumb_height
+    };
+
+    return true;
 }
 
 hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_rect_out) 
@@ -1008,7 +1169,7 @@ hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_re
     
     i32 drag_handle_height = block->border_width + block->padding_top;
     i32 resize_width = 10;
-
+    rect_t scroll_handle;
     rect_t drag_handle = {.x = block->abs_x, .y = block->abs_y,
                           .w = block->w, .h = drag_handle_height};
     rect_t left_edge = {.x = block->abs_x, .y = block->abs_y,
@@ -1059,143 +1220,119 @@ hit_region_t is_in_hit_region(ui_block_t *block, i32 mx, i32 my, rect_t *drag_re
         }
         return HIT_REGION_DRAG_HANDLE;
     }
+
+    if (get_scroll_thumb_rect(block, &scroll_handle) &&
+        inside_rect(mx, my, &scroll_handle))
+    {
+        if (drag_rect_out) {
+            *drag_rect_out = scroll_handle;
+        }
+
+        return HIT_REGION_SCROLL_BAR;
+    }
     
     return HIT_REGION_NONE;
 }
 
-void ui_handle_mouse_button(ui_context_t *ctx)
+void ui_handle_mouse_button(ui_context_t *ctx) 
 {
-    ui_block_t *target = ui_block_at_point(ctx, (i32)gc.mouse_x, (i32)gc.mouse_y);
+    ui_block_t *target = ui_block_at_point(ctx, (i32) gc.mouse_x, (i32) gc.mouse_y);
+    ui_interaction_t *ix = &ctx->interaction;
 
-    if (target && target->visible)
+    if (gc.left_button_down) 
     {
-        if (gc.left_button_down)
+        /* only claim active if it was hot and there is no current active blocks */
+        if(!target || !target->visible || !ix->hot_id || ix->active_id)
         {
-            if(target->hover)
+            return;
+        }
+
+        ix->active_id = target->id;
+
+        LOG_INFO("Block : %s clicked", target->title);
+
+        u64 active_id = djb2_hash_append(target->id, "active");
+        if (!animation_get(active_id, &target->active_anim_t)) {
+            animation_start(active_id, 0.0f, 1.0f, 0.1f, EASE_IN_OUT_CUBIC);
+        }
+
+        rect_t drag_rect = {0};
+        hit_region_t region = is_in_hit_region(target, gc.mouse_x, gc.mouse_y, &drag_rect);
+
+        switch (region) {
+        case HIT_REGION_LEFT_EDGE:
+            if (target->resizeable) 
             {
-                ctx->active_block_id = target->id;
-
-                printf("Block : %s clicked\n", target->title);
-                if(!target->clicked)
-                {
-                    target->clicked = true;
-                    if(!animation_get((u64)&target->active_anim_t, &target->active_anim_t)){
-                        animation_start((u64)&target->active_anim_t, 0.0f, 1.0f, 0.1f, EASE_IN_OUT_CUBIC);
-                    }
+                ix->mode         = UI_INTERACT_RESIZE_LEFT;
+                ix->drag_start_x = target->abs_x - gc.mouse_x;
+            }
+            break;
+        case HIT_REGION_RIGHT_EDGE:
+            if (target->resizeable) {
+                ix->mode         = UI_INTERACT_RESIZE_RIGHT;
+                ix->drag_start_x = (target->abs_x + target->w) - gc.mouse_x;
+            }
+            break;
+        case HIT_REGION_TOP_EDGE:
+                if (target->resizeable) {
+                    ix->mode         = UI_INTERACT_RESIZE_TOP;
+                    ix->drag_start_y = target->abs_y - gc.mouse_y;
                 }
-
-                rect_t drag_rect;
-                hit_region_t region = is_in_hit_region(target, gc.mouse_x, gc.mouse_y, &drag_rect);
-
-                switch(region)
-                {
-                    case HIT_REGION_NONE:
-                        break;
-                    case HIT_REGION_LEFT_EDGE:
-                        if(target->resizeable && !target->resizing)
-                        {
-                            target->resizing = true;
-                            target->resize_left = true;
-                            target->drag_start_x = target->abs_x - gc.mouse_x;
-                        }
-                        break;
-                    case HIT_REGION_RIGHT_EDGE:
-                        if(target->resizeable && !target->resizing)
-                        {
-                            target->resizing = true;
-                            target->resize_right = true;
-                            target->drag_start_x = (target->abs_x + target->w) - gc.mouse_x;
-                        }
-                        break;
-                    case HIT_REGION_TOP_EDGE:
-                        if(target->resizeable && !target->resizing)
-                        {
-                            target->resizing = true;
-                            target->resize_top = true;
-                            target->drag_start_y = target->abs_y - gc.mouse_y;
-                        }
-                        break;
-                    case HIT_REGION_BOTTOM_EDGE:
-                        if(target->resizeable && !target->resizing)
-                        {
-                            target->resizing = true;
-                            target->resize_bottom = true;
-                            target->drag_start_y = (target->abs_y + target->h) - gc.mouse_y;
-                        }
-                        break;
-                    case HIT_REGION_DRAG_HANDLE:
-                        if(target->draggable && !target->dragging)
-                        {
-                            target->dragging = true;
-                            target->drag_start_x = target->abs_x - gc.mouse_x;
-                            target->drag_start_y = target->abs_y - gc.mouse_y;
-                        }
-                        break;
-                    default:
-                        if(target->draggable && !target->dragging)
-                        {
-                            target->dragging = true;
-                        }
-                        break;
+                break;
+            case HIT_REGION_BOTTOM_EDGE:
+                if (target->resizeable) {
+                    ix->mode         = UI_INTERACT_RESIZE_BOTTOM;
+                    ix->drag_start_y = (target->abs_y + target->h) - gc.mouse_y;
+                }
+                break;
+            case HIT_REGION_DRAG_HANDLE:
+                if (target->draggable) {
+                    ix->mode         = UI_INTERACT_DRAG_MOVE;
+                    ix->drag_start_x = target->abs_x - gc.mouse_x;
+                    ix->drag_start_y = target->abs_y - gc.mouse_y;
+                }
+                break;
+        case HIT_REGION_SCROLL_BAR: {
+            if (target->scrollable) {
+                rect_t thumb;
+            ix->mode = UI_INTERACT_SCROLL_THUMB;
+                if (get_scroll_thumb_rect(target, &thumb)) {
+                    target->scroll_delta_y = gc.mouse_y - thumb.y;
                 }
             }
+            break;
         }
-        else
+        default:
+            ix->mode = target->draggable ? UI_INTERACT_DRAG_VALUE : UI_INTERACT_CLICKED;
+            break;
+        }
+        ui_block_save_state(target);
+        return;
+    }
+
+    // Was clicked and not anymore
+    if (ix->active_id) 
+    {
+        ui_block_t *active = ui_block_find_by_id(ctx, ix->active_id);
+        if(active)
         {
-            // Was clicked and not anymore
-            if(ctx->active_block_id == target->id)
+            if(target && target->id == active->id)
             {
-                target->released = true;
+                ix->released_id = active->id;
                 if (target->toggleable) {
                     target->toggled = !target->toggled;
                 }
-                printf("Block : %s released\n", target->title);
+                LOG_INFO("Block : %s released", target->title);
             }
-            else
-            {
-                ui_block_t *active = ui_block_find_by_id(ctx, ctx->active_block_id);
-                if (active)
-                {
-                    active->clicked  = false;
-                    active->dragging = false;
-                    active->released = false;
-                    ui_block_save_state(active);
-                }
-                target->released  = false;
-            }
-
-            target->clicked = false;
-            target->dragging = false;
-            target->resizing = false;
-            target->resize_left = target->resize_right = false;
-            target->resize_top = target->resize_bottom = false;
-
-            ctx->active_block_id = 0;
-        }
-        
-        if (gc.right_button_down) 
-        {
-        } 
-        else 
-        {
+            ui_block_save_state(target);
         }
 
-        ui_block_save_state(target);
+        ix->active_id = 0;
+        ix->mode = UI_INTERACT_NONE;
     }
-    else
-    {
-        if (!gc.left_button_down && ctx->active_block_id)
-        {
-            ui_block_t *active = ui_block_find_by_id(ctx, ctx->active_block_id);
-            if (active)
-            {
-                active->clicked  = false;
-                active->dragging = false;
-                active->released = false;
-                ui_block_save_state(active);
-            }
-            ctx->active_block_id = 0;
-        }
+
+    if (gc.right_button_down) {
+        // TODO:
     }
 }
 
@@ -1298,6 +1435,7 @@ void ui_layout_constraints(ui_block_t *block)
                 break;
             }
             case NO_LAYOUT:
+                /* Just skip the layout stage */
                 break;
         }
     }
@@ -1446,6 +1584,7 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
                 break;
             }
             case NO_LAYOUT:
+                /* Just skip the layout stage */
                 break;
         }
 
@@ -1453,37 +1592,48 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
     }
 }
 
+static inline bool ui_is_hot(ui_context_t *ctx, ui_block_t *block)      { return ctx->interaction.hot_id    == block->id; }
+static inline bool ui_is_active(ui_context_t *ctx, ui_block_t *block)   { return ctx->interaction.active_id == block->id; }
+static inline bool ui_is_released(ui_context_t *ctx, ui_block_t *block) { return ctx->interaction.released_id == block->id; }
+
+static inline bool ui_is_clicked(ui_context_t *ctx, ui_block_t *block)  
+{ 
+    return ui_is_active(ctx, block) && ctx->interaction.mode == UI_INTERACT_CLICKED; 
+}
+static inline bool ui_is_dragging(ui_context_t *ctx, ui_block_t *block) 
+{ 
+    return ui_is_active(ctx, block) && ctx->interaction.mode == UI_INTERACT_DRAG_MOVE; 
+}
+static inline bool ui_is_drag_value(ui_context_t *ctx, ui_block_t *block) 
+{ 
+    return ui_is_active(ctx, block) && ctx->interaction.mode == UI_INTERACT_DRAG_VALUE; 
+}
+static inline bool ui_is_scrolling(ui_context_t *ctx, ui_block_t *block) 
+{ 
+    return ui_is_active(ctx, block) && ctx->interaction.mode == UI_INTERACT_SCROLL_THUMB; 
+}
+static inline bool ui_is_resizing(ui_context_t *ctx, ui_block_t *block) 
+{ 
+    return ui_is_active(ctx, block) && (
+        ctx->interaction.mode == UI_INTERACT_RESIZE_LEFT  ||
+        ctx->interaction.mode == UI_INTERACT_RESIZE_RIGHT ||
+        ctx->interaction.mode == UI_INTERACT_RESIZE_TOP   ||
+        ctx->interaction.mode == UI_INTERACT_RESIZE_BOTTOM
+    ); 
+}
+
 void draw_scroll_bar(ui_block_t *block)
 {
-    if (block->max_scroll_y <= 0) {
-        return;
+    rect_t scroll_handle;
+    if (get_scroll_thumb_rect(block, &scroll_handle))
+    {
+        color4_t color = ui_is_scrolling(gc.ui_ctx,block) ? lite(HEX_TO_COLOR4(0x525356))
+                                                    : (inside_rect(gc.mouse_x, gc.mouse_y, &scroll_handle)) ? HEX_TO_COLOR4(0x525356) 
+                                                                                                             : HEX_TO_COLOR4(0x464649);
+
+        draw_rect_solid_wh(&gc.draw_buffer, scroll_handle.x, scroll_handle.y, 
+                            scroll_handle.w, scroll_handle.h, color);
     }
-    
-    i32 gap = block->border_width * 4;
-    i32 scroll_thumb_width = block->border_width * 2;
-    
-    i32 scroll_bar_x = block->w - gap + block->border_width;
-    
-    i32 content_height = block->max_scroll_y + block->h;
-
-    if (content_height <= 0){
-        return;
-    }
-    
-    f32 visible_ratio = Clamp(((f32)block->h / (f32)content_height), 0.1f, 1.0f);
-    
-    i32 scroll_thumb_height = (i32)(block->h * visible_ratio);
-    scroll_thumb_height = MAX(scroll_thumb_height, scroll_thumb_width * 2);
-
-    i32 scroll_bar_min_y = 0;
-    i32 scroll_bar_max_y = scroll_bar_min_y + block->h - scroll_thumb_height;
-    
-    f32 scroll_bar_ratio = fabsf((f32)(block->scroll_y)/(f32)(block->max_scroll_y));
-
-    i32 scroll_bar_y = LERP_F32(scroll_bar_min_y, scroll_bar_max_y, scroll_bar_ratio);
-    
-    ui_draw_rect_in_block(block, scroll_bar_x, scroll_bar_y, 
-                          scroll_thumb_width, scroll_thumb_height, HEX_TO_COLOR4(0x525356));
 }
 
 void ui_begin_panel(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width, u32 height, layout_t layout)
@@ -1520,12 +1670,12 @@ void ui_update_floating_panel(ui_block_t *block)
         first_update=false;
     }
 
-    if(block->id && gc.ui_ctx->active_block_id)
+    if(block->id && gc.ui_ctx->interaction.active_id)
     {
-        if(block->dragging)
+        if(ui_is_dragging(gc.ui_ctx,block))
         {   
-            new_pos.x = (f32)gc.mouse_x + block->drag_start_x;
-            new_pos.y = (f32)gc.mouse_y + block->drag_start_y;
+            new_pos.x = (f32)gc.mouse_x + gc.ui_ctx->interaction.drag_start_x;
+            new_pos.y = (f32)gc.mouse_y + gc.ui_ctx->interaction.drag_start_y;
 
             snap = false;
 
@@ -1573,23 +1723,25 @@ void ui_update_floating_panel(ui_block_t *block)
             }
         }
 
-        if (block->resizing)
+        if (ui_is_resizing(gc.ui_ctx, block))
         {
-            if (block->resize_left) {
-                i32 delta = gc.mouse_x + block->drag_start_x - new_pos.x;
+            i32 drag_start_x = gc.ui_ctx->interaction.drag_start_x;
+            i32 drag_start_y = gc.ui_ctx->interaction.drag_start_y;
+            if (gc.ui_ctx->interaction.mode == UI_INTERACT_RESIZE_LEFT) {
+                i32 delta = gc.mouse_x + drag_start_x - new_pos.x;
                 new_pos.x += delta;
                 new_pos.w -= delta;
             }
-            if (block->resize_right) {
-                new_pos.w = gc.mouse_x + block->drag_start_x - new_pos.x;
+            if (gc.ui_ctx->interaction.mode == UI_INTERACT_RESIZE_RIGHT) {
+                new_pos.w = gc.mouse_x + drag_start_x - new_pos.x;
             }
-            if (block->resize_top) {
-                i32 delta = gc.mouse_y + block->drag_start_y - new_pos.y;
+            if (gc.ui_ctx->interaction.mode == UI_INTERACT_RESIZE_TOP) {
+                i32 delta = gc.mouse_y + drag_start_y - new_pos.y;
                 new_pos.y += delta;
                 new_pos.h -= delta;
             }
-            if (block->resize_bottom) {
-                new_pos.h = gc.mouse_y + block->drag_start_y - new_pos.y;
+            if (gc.ui_ctx->interaction.mode == UI_INTERACT_RESIZE_BOTTOM) {
+                new_pos.h = gc.mouse_y + drag_start_y - new_pos.y;
             }
             
             if (new_pos.w < 100) new_pos.w = 100;
@@ -1732,20 +1884,9 @@ void ui_block_load_state(ui_block_t *block)
     if(state)
     {
         block->value = state->value.value;
-        block->hover = state->value.hover;
-        block->clicked = state->value.clicked;
         block->toggled = state->value.toggled;
-        block->released = state->value.released;
-        block->dragging = state->value.dragging;
-        block->resizing = state->value.resizing;
-        block->resize_left = state->value.resize_left;
-        block->resize_right = state->value.resize_right;
-        block->resize_top = state->value.resize_top;
-        block->resize_bottom = state->value.resize_bottom;
-        block->drag_start_x = state->value.drag_start_x; 
-        block->drag_start_y = state->value.drag_start_y;
-        block->scroll_y = state->value.scroll_y;
         block->scroll_x = state->value.scroll_x;
+        block->scroll_y = state->value.scroll_y;
     }
     else
     {
@@ -1758,20 +1899,9 @@ void ui_block_save_state(ui_block_t *block)
 {
     ui_block_state_t state = {
         .value = block->value,
-        .hover = block->hover,
-        .clicked = block->clicked,
         .toggled = block->toggled,
-        .released = block->released,
-        .dragging = block->dragging,
-        .resizing   = block->resizing,
-        .resize_left = block->resize_left,
-        .resize_right = block->resize_right,
-        .resize_top   = block->resize_top,
-        .resize_bottom = block->resize_bottom,
-        .drag_start_x = block->drag_start_x,
-        .drag_start_y = block->drag_start_y,
-        .scroll_y = block->scroll_y,
         .scroll_x = block->scroll_x,
+        .scroll_y = block->scroll_y,
     };
 
     shput(gc.block_map, block->title, state);
@@ -1813,7 +1943,8 @@ void ui_render_block(ui_block_t *block)
         }
         else
         {
-            color4_t color = block->hover?block->hover_color:block->bg_color;
+            bool hovered   = ui_is_hot(gc.ui_ctx, block);
+            color4_t color = hovered?block->hover_color:block->bg_color;
             ui_draw_rect_in_block(block, 0, 0, 
                                   block->w, block->h, color);
             if (block->text.string) {
@@ -1841,18 +1972,13 @@ void ui_render_block(ui_block_t *block)
     pop_scissor();
 }
 
-void reset_block_interaction(ui_block_t *block)
-{
-    block->hover = false;
-    // block->released = false;
-    // block->clicked = false;
-}
 
 /* -------------- Checkbox Widget Stuff -------------- */
 
 void ui_render_checkbox(ui_block_t *block)
 {
-    color4_t color = block->hover?block->hover_color:block->bg_color;
+    bool hovered   = ui_is_hot(gc.ui_ctx, block);
+    color4_t color = hovered?block->hover_color:block->bg_color;
 
     ui_draw_rect_in_block(block, 0, 0, 
                           block->w, block->h, color);
@@ -1949,8 +2075,8 @@ void ui_render_button(ui_block_t *block)
     color = color4_lerp(color, lite(HEX_TO_COLOR4(0x47c179)), block->active_anim_t);
 
     float scale = WEIGHTED2(1.0f,
-                            block->hot_anim_t, 0.05f,         // grows a bit when hovered
-                            block->active_anim_t, -0.04f);    // shrinks a bit when pressed.
+                            block->hot_anim_t, 0.02f,         // grows a bit when hovered
+                            block->active_anim_t, -0.01f);    // shrinks a bit when pressed.
 
 
     float scaled_w = block->w * scale;
@@ -1996,28 +2122,53 @@ bool ui_button(ui_context_t *ctx, char *title)
     button->hover_color = lite(HEX_TO_COLOR4(0xbd93f9));
     button->custom_render = ui_render_button;
 
-    if(!animation_get((u64)&button->hot_anim_t, &button->hot_anim_t))
+    u64 hot_id = (u64)djb2_hash_append(button->id, "hot");
+    u64 active_id = (u64)djb2_hash_append(button->id, "active");
+
+    if(!animation_get(hot_id, &button->hot_anim_t))
     {
-        button->hot_anim_t = button->hover;
+        button->hot_anim_t = ui_is_hot(ctx, button);
     }
 
-    if(!animation_get((u64)&button->active_anim_t, &button->active_anim_t))
+    if(!animation_get(active_id, &button->active_anim_t))
     {
-        button->active_anim_t = button->clicked;
-    }
-
-    bool release = button->released;
-
-    if(release){
-        button->released = false;
+        button->active_anim_t = ui_is_clicked(ctx, button);
     }
 
     ui_add_child(ctx, button);
 
-    return release;
+    return ui_is_released(ctx, button);
 }
 
 /* -------------- Toggle Widget Stuff -------------- */
+
+void ui_update_toggle(ui_block_t *toggle)
+{
+    u64 hot_id = (u64)djb2_hash_append(toggle->id, "hot");
+    u64 active_id = (u64)djb2_hash_append(toggle->id, "active");
+
+    if (!animation_get(hot_id, &toggle->hot_anim_t))
+    {
+        toggle->hot_anim_t = ui_is_hot(gc.ui_ctx, toggle) ? 1.0f : 0.0f;
+    }
+
+    if (!animation_get(active_id, &toggle->active_anim_t))
+    {
+        toggle->active_anim_t = toggle->toggled ? 1.0f : 0.0f;
+    }
+
+    static bool prev_toggled = false;
+    if (toggle->toggled != prev_toggled)
+    {
+        animation_start(active_id,
+                        toggle->active_anim_t,
+                        toggle->toggled ? 1.0f : 0.0f,
+                        0.1f,
+                        EASE_IN_OUT_CUBIC);
+        prev_toggled = toggle->toggled;
+    }
+
+}
 
 void ui_render_toggle(ui_block_t *block)
 {
@@ -2055,6 +2206,7 @@ void ui_render_toggle(ui_block_t *block)
     //     ui_render_text_in_block(block);
     // }
 }
+
 bool ui_toggle(ui_context_t *ctx, char *title)
 {
     ui_block_t *toggle = CHECK_PTR(ui_new_block(ctx, title, 0, 0, 0, 40, NO_LAYOUT));
@@ -2067,24 +2219,7 @@ bool ui_toggle(ui_context_t *ctx, char *title)
     toggle->hover_color = lite(HEX_TO_COLOR4(0x282a36));
 
     toggle->custom_render = ui_render_toggle;
-
-    if (!animation_get((u64)&toggle->hot_anim_t, &toggle->hot_anim_t))
-        toggle->hot_anim_t = toggle->hover ? 1.0f : 0.0f;
-
-    if (!animation_get((u64)&toggle->active_anim_t, &toggle->active_anim_t))
-    {
-        toggle->active_anim_t = toggle->toggled ? 1.0f : 0.0f;
-    }
-    static bool prev_toggled = false;
-    if (toggle->toggled != prev_toggled)
-    {
-        animation_start((u64)toggle->active_anim_t,
-                        toggle->active_anim_t,
-                        toggle->toggled ? 1.0f : 0.0f,
-                        0.15f,
-                        EASE_IN_OUT_CUBIC);
-        prev_toggled = toggle->toggled;
-    }
+    toggle->custom_update = ui_update_toggle;
 
     ui_add_child(ctx, toggle);
 
@@ -2095,7 +2230,7 @@ bool ui_toggle(ui_context_t *ctx, char *title)
 
 void ui_render_radio(ui_block_t *block)
 {
-    color4_t color = block->hover?block->hover_color:block->bg_color;
+    color4_t color = ui_is_hot(gc.ui_ctx, block)?block->hover_color:block->bg_color;
 
     ui_draw_rect_in_block(block, 0, 0, block->w, block->h, color);
 
@@ -2158,7 +2293,7 @@ void ui_radio(ui_context_t *ctx, char *title, i32 *var, i32 val)
 
     ui_add_child(ctx, radio);
 
-    if(radio->clicked)
+    if(ui_is_clicked(ctx, radio))
     {
         *var = val;
     }
@@ -2187,7 +2322,7 @@ void ui_render_slider(ui_block_t *block)
     ui_draw_rect_in_block(block, handle_start_x, track_y,
                           block->w-handle_x, track_height, HEX_TO_COLOR4(0xcab6e6));
     
-    color4_t handle_color = block->clicked ?  HEX_TO_COLOR4(0x6200ee) : dark(HEX_TO_COLOR4(0x6200ee));
+    color4_t handle_color = ui_is_clicked(gc.ui_ctx, block) ?  HEX_TO_COLOR4(0x6200ee) : dark(HEX_TO_COLOR4(0x6200ee));
     
     rect_t handle = {
         block->abs_x + handle_start_x,
@@ -2202,14 +2337,17 @@ void ui_render_slider(ui_block_t *block)
     bool hovered      = inside_rect(gc.mouse_x, gc.mouse_y, &handle);
     bool just_entered = hovered && !was_hovered;
 
+    u64 handle_id = (u64)djb2_hash_append(block->id, "handle");
+    
+
     if(hovered)
     {
         handle_color = HEX_TO_COLOR4(0x3149c7);
 
         if(just_entered)
-            animation_start((u64)&handle, 1.0f, 1.5f, 0.2f, EASE_IN_OUT_CUBIC);
+            animation_start(handle_id, 1.0f, 1.5f, 0.2f, EASE_IN_OUT_CUBIC);
 
-        animation_get((u64)&handle, &glow_scale);
+        animation_get(handle_id, &glow_scale);
     }
     else
     {
@@ -2239,13 +2377,7 @@ void ui_update_slider(ui_block_t *block)
 {
     block->value = Clamp(block->min_value, block->value, block->max_value);
     
-    if(block->id != gc.ui_ctx->active_block_id)
-    {
-        block->clicked = false;
-        return;
-    }
-
-    if(block->clicked)
+    if(ui_is_clicked(gc.ui_ctx, block))
     {
         f32 normalized = ((f32)gc.mouse_x - block->abs_x) / (f32)block->w;
         normalized = Clamp(0.0f, normalized, 1.0f);
@@ -2273,14 +2405,17 @@ f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
     slider->custom_render = ui_render_slider;
     slider->custom_update = ui_update_slider;
 
-    if(!animation_get(slider->id, &slider->hot_anim_t))
+    u64 hot_id = (u64)djb2_hash_append(slider->id, "hot");
+    u64 active_id = (u64)djb2_hash_append(slider->id, "active");
+
+    if(!animation_get(hot_id, &slider->hot_anim_t))
     {
-        slider->hot_anim_t = slider->hover;
+        slider->hot_anim_t = ui_is_hot(ctx, slider);
     }
 
-    if(!animation_get(slider->id+1, &slider->active_anim_t))
+    if(!animation_get(active_id, &slider->active_anim_t))
     {
-        slider->active_anim_t = slider->clicked;
+        slider->active_anim_t = ui_is_clicked(ctx, slider);;
     }
 
     ui_add_child(ctx, slider);
@@ -2382,8 +2517,10 @@ f32 ui_knob(ui_context_t *ctx, char *title, f32 min, f32 max)
     knob->max_value    = max;
     knob->custom_render = ui_render_knob;
 
-    if (!animation_get((u64)&knob->hot_anim_t, &knob->hot_anim_t))
-        knob->hot_anim_t = knob->hover;
+    u64 hot_id = (u64)djb2_hash_append(knob->id, "hot");
+
+    if (!animation_get(hot_id, &knob->hot_anim_t))
+        knob->hot_anim_t = ui_is_hot(ctx, knob);
 
     ui_add_child(ctx, knob);
 
@@ -2406,10 +2543,7 @@ void ui_update_tree_node(ui_block_t *block)
     
     tree_node_state_t *node = &map_entry->value;
 
-    bool release = block->released;
-
-    if(release){
-        block->released = false;
+    if(ui_is_released(gc.ui_ctx, block)){
         TOGGLE(node->collapsed);
     }
 }
@@ -2421,7 +2555,7 @@ void ui_render_tree_node(ui_block_t *block)
     
     tree_node_state_t *node = &map_entry->value;
 
-    color4_t color = block->hover?HEX_TO_COLOR4(0x287fc9):COLOR_TRANSPARENT;
+    color4_t color = ui_is_hot(gc.ui_ctx,block)?HEX_TO_COLOR4(0x287fc9):COLOR_TRANSPARENT;
 
     ui_draw_rect_in_block(block, 0, 0, block->w, block->h, color);
 
@@ -2583,12 +2717,8 @@ void ui_update_radial_menu(ui_block_t *block)
         }
     }
 
-    bool release = block->released;
+    bool release = ui_is_released(gc.ui_ctx, block);
 
-    if(release){
-        block->released = false;
-    }
-    
     if (release && menu->hovered_index >= 0) 
     {
         menu->selected_index = menu->hovered_index;
@@ -3073,7 +3203,7 @@ void ui_text_edit_update(ui_block_t *block)
         state->cursor_blink_timer = 0.0;
     }
 
-    if(block->clicked)
+    if(ui_is_clicked(gc.ui_ctx, block))
     {
         // gain focus
         gc.focused_text_edit = block->title;
@@ -3084,7 +3214,7 @@ void ui_text_edit_update(ui_block_t *block)
         state->cursor_visible = true;
         state->cursor_blink_timer = 0.0;
     }
-    else if (gc.left_button_down && !block->hover && state->focused)
+    else if (gc.left_button_down && !ui_is_hot(gc.ui_ctx, block)&& state->focused)
     {
         // clicked outside lose focus
         if (gc.focused_text_edit && strcmp(gc.focused_text_edit, block->title) == 0) {
@@ -3096,12 +3226,12 @@ void ui_text_edit_update(ui_block_t *block)
 
     if (gc.left_button_down)
     {
-        if(block->hover)
+        if(ui_is_hot(gc.ui_ctx, block))
         {
             if(!state->dragging)
             {
                 state->dragging = true;
-                block->drag_start_x = gc.mouse_x;
+                gc.ui_ctx->interaction.drag_start_x = gc.mouse_x;
             }
         }
     }
@@ -3115,7 +3245,7 @@ void ui_text_edit_update(ui_block_t *block)
         if(!state->mouse_selecting)
         {
             state->mouse_selecting = true;
-            state->drag_start_x = text_edit_get_char_at_x(block, state, block->drag_start_x);
+            state->drag_start_x = text_edit_get_char_at_x(block, state, gc.ui_ctx->interaction.drag_start_x);
             state->selection_start = state->drag_start_x;
         }
 
@@ -3128,7 +3258,7 @@ void ui_text_edit_update(ui_block_t *block)
         }
     }
 
-    if (!block->dragging)
+    if (!ui_is_dragging(gc.ui_ctx, block))
     {
         state->mouse_selecting = false;
     }
@@ -3676,7 +3806,10 @@ void render_layout_test_screen(void)
                 ui_end_panel(gc.ui_ctx);
                 ui_begin_panel(gc.ui_ctx, "Test1-2", 0, 0, 50, 0, HORIZONTAL_LAYOUT);
                 ui_end_panel(gc.ui_ctx);
-                ui_button(gc.ui_ctx,"Buttton1");
+                if(ui_button(gc.ui_ctx,"Buttton1"))
+                {
+                    printf("Release is working\n");
+                }
                 ui_button(gc.ui_ctx,"Buttton23");
             ui_end_panel(gc.ui_ctx);
                 
@@ -3780,18 +3913,18 @@ void render_debug_screen(void)
 
     for(i32 i = gc.ui_ctx->block_count-1 ; i >= 0; i--)
     {
-        if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->hot_block_id)
+        if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->interaction.hot_id)
         {
             i32 screen_x = gc.ui_ctx->blocks[i]->abs_x;
             i32 screen_y = gc.ui_ctx->blocks[i]->abs_y;
 
             draw_rect_outline_wh(&gc.draw_buffer, screen_x, screen_y, 
                                  gc.ui_ctx->blocks[i]->w, gc.ui_ctx->blocks[i]->h, 
-                                (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_GREEN:COLOR_RED);
+                                (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->interaction.active_id) ? COLOR_GREEN:COLOR_RED);
 
             draw_rect_outline_wh(&gc.draw_buffer, screen_x, screen_y, 
                                   gc.ui_ctx->blocks[i]->scissor_region.w, gc.ui_ctx->blocks[i]->scissor_region.h,
-                                 (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id) ? COLOR_LIME:COLOR_YELLOW);
+                                 (gc.ui_ctx->blocks[i]->id == gc.ui_ctx->interaction.active_id) ? COLOR_LIME:COLOR_YELLOW);
             // draw_aaline(&gc.draw_buffer, screen_x, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
             // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y+gc.ui_ctx->blocks[i]->h, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
             // draw_aaline(&gc.draw_buffer, screen_x+gc.ui_ctx->blocks[i]->w, screen_y, gc.mouse_x, gc.mouse_y, COLOR_GREEN);
@@ -3801,7 +3934,7 @@ void render_debug_screen(void)
 
     for(i32 i = gc.ui_ctx->block_count-1 ; i >= 0; i--)
     {
-        if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->active_block_id)
+        if(gc.ui_ctx->blocks[i]->id == gc.ui_ctx->interaction.active_id)
         {
             i32 screen_x = gc.ui_ctx->blocks[i]->abs_x;
             i32 screen_y = gc.ui_ctx->blocks[i]->abs_y;
@@ -3847,7 +3980,8 @@ void render_interactive_texture(void)
 
     if(inside)
     {
-        draw_rect_outline_wh(&gc.draw_buffer, new_pos.x, new_pos.y, new_pos.w, new_pos.h, HEX_TO_COLOR4(0x466472));
+        draw_rect_outline_wh(&gc.draw_buffer, new_pos.x, new_pos.y, 
+                            new_pos.w, new_pos.h, HEX_TO_COLOR4(0x466472));
     }
 
     if (gc.left_button_down)
@@ -3863,13 +3997,15 @@ void render_interactive_texture(void)
         {
             new_pos.x = gc.mouse_x - drag_offset_x;
             new_pos.y = gc.mouse_y - drag_offset_y;
-            draw_rect_outline_wh(&gc.draw_buffer, new_pos.x, new_pos.y, new_pos.w, new_pos.h, HEX_TO_COLOR4(0x61605e));
+            draw_rect_outline_wh(&gc.draw_buffer, new_pos.x, new_pos.y,
+                                 new_pos.w, new_pos.h, HEX_TO_COLOR4(0x61605e));
         }
     }
     else
     {
         dragging = false;
     }
+
     render_texture_to_buffer(&gc.draw_buffer, gc.my_texture, new_pos.x, new_pos.y, 5.0f, &new_pos);
 }
 
@@ -3890,6 +4026,11 @@ void render_all(void)
     }
     
     ui_new_frame(gc.ui_ctx);
+
+    static u32 side_panel_x = 0;
+    side_panel_x= gc.side_panel_x * gc.screen_width;
+    if(manipulator_axis_x(&side_panel_x, 20))
+        gc.side_panel_x = (f32)side_panel_x / (f32)gc.screen_width;
 
     PROFILE("Main screen")
     {
@@ -3924,7 +4065,7 @@ void update_time(void)
     
     gc.frame_history[gc.frame_idx] = gc.dt;
     
-    gc.frame_idx = INC_WRAP(gc.frame_idx, FRAME_HISTORY_SIZE);
+    gc.frame_idx = RING_INC_WRAP(gc.frame_idx, FRAME_HISTORY_SIZE);
     
     // Calculate average frame time to not look crazy when printed
     f64 totalTime = 0.0;
@@ -3935,7 +4076,7 @@ void update_time(void)
     gc.current_fps = (gc.average_frame_time > 0.0) ? (1.0 / gc.average_frame_time) : 0.0;
 }
 
-void update_all()
+void update_all(void)
 {
     update_time();
     animation_update(gc.dt);
@@ -3943,7 +4084,7 @@ void update_all()
     ui_update(gc.ui_ctx);
 }
 
-void cleanup_all()
+void cleanup_all(void)
 {
     arena_reset(gc.frame_arena);
 
@@ -3986,6 +4127,8 @@ void init_framebuffer(i32 max_width, i32 max_height)
 
 void *create_window(u32 width, u32 height, char *title)
 {
+    /* https://github.com/glfw/glfw/pull/1426/  */
+    glfwInitHint(GLFW_WIN32_MESSAGES_IN_FIBER, GLFW_TRUE);
     if (!glfwInit()) {
         fprintf(stderr, "Error : Failed to initialize GLFW\n");
         return NULL;
@@ -3995,13 +4138,14 @@ void *create_window(u32 width, u32 height, char *title)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_RESIZABLE, GL_TRUE);
-    // glfwWindowHint(GLFW_SAMPLES, 8); // Enable multisampling for smoother edges
+    // glfwWindowHint(GLFW_SAMPLES, 4); // Enable multisampling for smoother edges
     
     GLFWwindow *window = CHECK_PTR(glfwCreateWindow((int)width, (int)height, title, NULL, NULL));
     
     glfwMakeContextCurrent(window);
 
-    glfwSwapInterval(0);
+    // vsync on
+    glfwSwapInterval(1);
     
     glViewport(0, 0, (int)width, (int)height);
     
@@ -4039,26 +4183,27 @@ void init_time(void)
     gc.current_fps = 60.0;
 }
 
-bool init_all(void)
+bool init_all(u32 w, u32 h, char *title, char *icon)
 {
-    gc.screen_width  = 1100;
-    gc.screen_height = 800;
+    gc.screen_width  = w;
+    gc.screen_height = h;
 
-    gc.window = CHECK_PTR(create_window(gc.screen_width, gc.screen_height, "UI"));
+    gc.window = CHECK_PTR(create_window(gc.screen_width, gc.screen_height, title));
 
     if(!gc.window){
         return false;
     }
 
+    // Allocate alot so we dont have to reallocate again
     gc.frame_arena = arena_reserve(MB(10));
 
+    // Just do the maximum possible size 
     init_framebuffer(1920, 1080);
 
     prof_init();
 
     gc.font = load_font_from_file("..\\Font\\Lato.ttf", 32.0f);
     gc.icon_font = load_font_from_file("..\\Font\\Icons.ttf", 32.0f);
-
 
     if(!(gc.font && gc.icon_font)){
         return false;
@@ -4084,8 +4229,8 @@ bool init_all(void)
     gc.regular_cursor = CHECK_PTR(glfwCreateStandardCursor(GLFW_ARROW_CURSOR));
     
     set_dark_mode(gc.window);
-    set_window_icon("..\\Resources\\icon.png");
-    gc.my_texture = load_texture("..\\Resources\\icon.png");
+    set_window_icon(icon);
+    gc.my_texture = load_texture(icon);
 
     gc.side_panel_x = 0.3;
 
@@ -4099,21 +4244,31 @@ bool init_all(void)
 
 int main(void)
 {   
-    if(!init_all())
+    if(!init_all(1100, 800, "UI", "..\\Resources\\icon.png"))
     {
-        fprintf(stderr, "Error : Failed to initialize application");
+        fprintf(stderr, "Error : Failed to initialize application.");
         exit(EXIT_FAILURE);
     }
 
+    static double prev_time = 0.0;
+
     while(!glfwWindowShouldClose((GLFWwindow*)gc.window))
     {
+        double now = glfwGetTime();
+        double dt = 0;
+        if (prev_time != 0.0)
+        {
+            dt = now - prev_time;
+        }
+        prev_time = now;
+
         PROFILE("Total Actual Time")
         {
             PROFILE("Updating All")
             {
                 update_all();
             }
-            
+
             PROFILE("Rendering all")
             {
                 render_all();
@@ -4123,7 +4278,6 @@ int main(void)
             {
                 poll_events();
             }
-            
         }
 
         cleanup_all();

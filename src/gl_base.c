@@ -1,6 +1,15 @@
+
 #ifdef _WIN32
-        __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;           // Optimus: force switch to discrete GPU
-        __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;     // AMD
+#define VC_EXTRALEAN
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <Wincon.h>
+
+// extern "C" {
+__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;// Optimus: force switch to discrete GPU
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;//AMD
+// }
 #endif
 
 typedef struct 

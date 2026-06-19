@@ -15,7 +15,6 @@
     #include <errno.h>
 #endif
 
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,15 +29,188 @@
 
 #include <immintrin.h> 
 
+#define DEBUG            1
+#define LOG              1
+
+/* OS */
+# if defined(_WIN32)
+    # define OS_WINDOWS 1
+# elif defined(__gnu_linux__)
+    # define OS_LINUX 1
+# elif defined(__APPLE__) && defined(__MACH__)
+    # define OS_MAC 1
+# else
+    # error cannot recognize the OS
+# endif
+
+/* Compiler */
+#if defined(__clang__)
+    #define COMPILER_CLANG 1
+#elif defined(_MSC_VER)
+    #define COMPILER_CL 1
+#elif defined(__GNUC__)
+    #define COMPILER_GCC 1
+#else
+    #error unrecognized compiler !
+#endif
+
+/* Architecture */
+# if defined(__amd64__) || defined(_M_AMD64)
+    # define ARCH_X64 1
+# elif defined(__i386__) || defined(_M_I86)
+    # define ARCH_X86 1
+# elif defined(__arm__) || defined(_M_ARM)
+    # define ARCH_ARM 1
+# elif defined(__aarch64__)
+    # define ARCH_ARM64 1
+# else
+    # error unrecognized Architecture
+# endif
+
+/* Pack structs */
+#if defined(_MSC_VER)
+    #define NO_PADDING_BEGIN __pragma(pack(push, 1))
+    #define NO_PADDING_END   __pragma(pack(pop))
+    #define NO_PADDING
+#elif defined(__GNUC__) || defined(__clang__)
+    /* GCC / Clang */
+    #define NO_PADDING_BEGIN
+    #define NO_PADDING_END
+    #define NO_PADDING __attribute__((packed))
+
+#else
+    #define NO_PADDING_BEGIN
+    #define NO_PADDING_END
+    #define NO_PADDING
+#endif
+
+/* Force inline */
+#if defined(_MSC_VER)
+  #define FORCE_INLINE __forceinline
+#else
+  #define FORCE_INLINE __attribute__((always_inline)) inline
+#endif
+
+/* Dont inline */
+#if defined(_MSC_VER)
+    #define NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+    #define NOINLINE __attribute__((noinline))
+#else
+    #define NOINLINE
+#endif
+
+/* Align */
+#if defined(_MSC_VER)
+    #define ALIGN_TO(x) __declspec(align(x))
+#elif defined(__GNUC__) || defined(__clang__)
+    #define ALIGN_TO(x) __attribute__((aligned(x)))
+#else
+    #define ALIGN_TO(x)
+#endif
+
+
+#if defined(_MSC_VER)
+  #ifdef BUILDING_DLL
+    #define MYAPI __declspec(dllexport)
+  #else
+    #define MYAPI __declspec(dllimport)
+  #endif
+#else
+  #define MYAPI __attribute__((visibility("default")))
+#endif
+
+/* Mark deprecated */
+#if defined(_MSC_VER)
+    #define DEPRECATED(msg) __declspec(deprecated(msg))
+#elif defined(__GNUC__) || defined(__clang__)
+    #define DEPRECATED(msg) __attribute__((deprecated(msg)))
+#else
+    #define DEPRECATED(msg)
+#endif
+
+/* warn if result not used */
+#if defined(_MSC_VER)
+    #define WARN_UNUSED_RESULT _Check_return_
+#elif defined(__GNUC__) || defined(__clang__)
+    #define WARN_UNUSED_RESULT __attribute__((warn_unused_result))
+#else
+    #define WARN_UNUSED_RESULT
+#endif
+
+#if defined(_MSC_VER)
+    #define RESTRICT_RET __declspec(restrict)
+    #define RESTRICT     __restrict
+#elif defined(__GNUC__) || defined(__clang__)
+    #define RESTRICT_RET __attribute__((malloc))
+    #define RESTRICT     __restrict__
+#else
+    #define RESTRICT_RET
+    #define RESTRICT
+#endif
+
+/* Thread Local */
+#ifdef _WIN32
+    #define THREAD_LOCAL __declspec(thread)
+#else
+    #define THREAD_LOCAL __thread
+#endif
+
+#if defined(_MSC_VER)
+    #define SELECTANY __declspec(selectany)
+#elif defined(__GNUC__) || defined(__clang__)
+    #define SELECTANY __attribute__((weak))
+#else
+    #define SELECTANY
+#endif
+
+/* Helper for GCC/Clang pragma stringification */
+#if defined(__GNUC__) || defined(__clang__)
+    #define DO_PRAGMA(X) _Pragma(#X)
+#endif
+
+/* Warning Push/Pop and Disable */
+#if defined(_MSC_VER)
+    #define WARNINGS_PUSH __pragma(warning(push))
+    #define WARNINGS_POP  __pragma(warning(pop))
+    #define DISABLE_WARNING_MSVC(warnCode) __pragma(warning(disable: warnCode))
+    #define DISABLE_WARNING_GCC(warnStr)
+    #define DISABLE_WARNING_CLANG(warnStr)
+
+#elif defined(__clang__)
+    #define WARNINGS_PUSH DO_PRAGMA(clang diagnostic push)
+    #define WARNINGS_POP  DO_PRAGMA(clang diagnostic pop)
+    #define DISABLE_WARNING_MSVC(warnCode)
+    #define DISABLE_WARNING_GCC(warnStr)
+    #define DISABLE_WARNING_CLANG(warnStr) DO_PRAGMA(clang diagnostic ignored warnStr)
+
+#elif defined(__GNUC__)
+    #define WARNINGS_PUSH DO_PRAGMA(GCC diagnostic push)
+    #define WARNINGS_POP  DO_PRAGMA(GCC diagnostic pop)
+    #define DISABLE_WARNING_MSVC(warnCode)
+    #define DISABLE_WARNING_GCC(warnStr)   DO_PRAGMA(GCC diagnostic ignored warnStr)
+    #define DISABLE_WARNING_CLANG(warnStr)
+
+#else
+    #define WARNINGS_PUSH
+    #define WARNINGS_POP
+    #define DISABLE_WARNING_MSVC(warnCode)
+    #define DISABLE_WARNING_GCC(warnStr)
+    #define DISABLE_WARNING_CLANG(warnStr)
+#endif
+
 #define TAB_SIZE                    4
-#define DEBUG                       1
 
 #define M_PI                        3.14159265358979323846
 #define M_PI_2                      1.57079632679489661923
 #define TAU                         6.28318530717958647692
+#define EULER                       2.71828182846 
+#define SQRT2_OVER_2                0.70710678118f
+#define SQRT3                       1.73205080757f
 
 #define ArrayCount(x)               ((sizeof(x))/(sizeof((x)[0])))
 
+/* Very useful when wanting to use pointers as ids  */
 #define IntFromPtr(p)               (u64)((u8*)p - (u8*)0)
 #define PtrFromInt(n)               (void*)((u8*)0 + (n))
 
@@ -60,7 +232,37 @@
 #define MemoryCopyTyped(d,s,c)      MemoryCopy((d),(s),\
                                     MIN(sizeof(*(d)),sizeof(*(s)))*(c))
 
+
+/*
+    Mainly to solve this scenario :
+    --------------------------------
+    #define FOO(n)   foo(n);bar(n)
+
+    void foobar(int n) {
+        if (n)
+            FOO(n);
+    }
+
+    Which would be expanded to:
+
+    void foobar(int n) {
+        if (n)
+            foo(n);bar(n);
+    }
+
+    which may not be what is intended
+ */
 #define Stmnt(S)                    do{ S }while(0)
+
+
+#define AssertBreak()               (*(int*)0=0)  // should reliably crash
+
+#if DEBUG
+    #define Assert(c) Stmnt(if((!c)){AssertBreak();})
+#else
+    #define Assert(c)
+#endif
+
 
 #define DEBUG_PRT(fmt, ...)\
     do{\
@@ -70,6 +272,7 @@
 
 #define Stringify_(S) #S
 #define Stringify(S) Stringify_(S)
+
 #define Glue_(A,B) A##B
 #define Glue(A,B) Glue_(A,B)
 
@@ -112,6 +315,9 @@ const char* enum_strings[] = {
         (x) = (y);    \
         (y) = tmp;    \
     } while (0)
+
+#define DEFER_BLOCK(begin, end) \
+    for(int _defer_ = ((begin), 0); !_defer_; _defer_ = 1, (end))
 
 #define EPSILON_F32                     (1e-6f)
 #define EPSILON_F64                     (1e-12)
@@ -159,7 +365,9 @@ const char* enum_strings[] = {
 
 #define FPS(n)                          (1000/n)
 
+// handles overflow
 #define MIDPOINT(start, end)            ((start) + ((end) - (start)) / 2)
+
 #define LEN_BETWEEN(start, end, include_end) \
     ((end) >= (start) ? (size_t)((end) - (start)) + ((include_end) ? 1 : 0) : 0)
 
@@ -170,13 +378,18 @@ const char* enum_strings[] = {
     (((value) - (from_min)) * ((to_max) - (to_min)) / ((from_max) - (from_min)) + (to_min))
 
 // Normalize a value from arbitrary range to [0 -> 1]
-#define NORMALIZE(val, min, max)        (((val) - (min)) / ((max) - (min)))
+#define NORMALIZE(val, min, max)             (((val) - (min)) / ((max) - (min)))
 
-#define WRAP_INDEX(pos, size)           (((pos) + (size)) % (size))
-#define INC_WRAP(pos, size)             (((pos) + (1)) % (size))
-#define IN_RANGE_WRAP(a,start,end)      (((end) < (start)) ? \
-                                         ((a) >= (start) || (a) <= (end)) : \
-                                         ((a) >= (start) && (a) <= (end)) )
+// handle negative numbers
+#define RING_WRAP_INDEX(pos, size)           (((pos) + (size)) % (size))
+
+// always prefer the pow of 2 if you can
+#define RING_INC_WRAP(pos, size)             (((pos) + (1)) % (size))
+#define RING_INC_WRAP_POW2(pos, size)        (((pos) + 1) & ((size) - 1))
+
+#define RING_IN_RANGE_WRAP(a,start,end)      (((end) < (start)) ? \
+                                             ((a) >= (start) || (a) <= (end)) : \
+                                             ((a) >= (start) && (a) <= (end)) )
 
 #define RING_COPY_OUT(dst, ring, start, count, capacity, type)                 \
     do {                                                                       \
@@ -187,6 +400,18 @@ const char* enum_strings[] = {
             size_t _second = (count) - _first;                                 \
             memcpy((dst), &(ring)[(start)], _first * sizeof(type));            \
             memcpy((dst) + _first, (ring), _second * sizeof(type));            \
+        }                                                                      \
+    } while (0)
+
+#define RING_COPY_IN(ring, src, start, count, capacity, type)                  \
+    do {                                                                       \
+        size_t _first = (capacity) - (start);                                  \
+        if (_first >= (count)) {                                               \
+            memcpy(&(ring)[(start)], (src), (count) * sizeof(type));           \
+        } else {                                                               \
+            size_t _second = (count) - _first;                                 \
+            memcpy(&(ring)[(start)], (src), _first * sizeof(type));            \
+            memcpy((ring), ((type*)(src)) + _first, _second * sizeof(type));   \
         }                                                                      \
     } while (0)
 
@@ -218,8 +443,11 @@ const char* enum_strings[] = {
 #define INVERSE_LERP(a, b, value)   (((value) - (a)) / ((b) - (a)))
 
 // Start from a base value and modify it using influences.
-#define WEIGHTED2(base, a, wa, b, wb) ((base) + (a)*(wa) + (b)*(wb))
+#define WEIGHTED2(base, a, wa, b, wb)  ((base) + (a)*(wa) + (b)*(wb))
 #define WEIGHTED3(base,a,wa,b,wb,c,wc) ((base)+(a)*(wa)+(b)*(wb)+(c)*(wc))
+
+#define fractionOf(x)               (x - floorf(x))
+#define oneMinusFractionOf(x)       (1 - fractionOf(x))
 
 #define ClampTop(A,X)               MIN(A,X)
 #define ClampBot(X,B)               MAX(X,B)
@@ -300,6 +528,8 @@ typedef double      f64;
 #define local_persist       static
 #define global_variable     static
 
+#define c_linkage           extern "c"
+
 #ifdef _WIN32
     typedef HANDLE thread_handle_t;
     typedef DWORD (WINAPI *thread_func_t)(LPVOID);
@@ -326,43 +556,44 @@ typedef double      f64;
     typedef atomic_int atomic_int_t;
 #endif
 
-global_variable u32 sign32     = 0x80000000;
-global_variable u32 exponent32 = 0x7F800000;
-global_variable u32 mantissa32 = 0x007FFFFF;
+static const u32 sign32     = 0x80000000;
+static const u32 exponent32 = 0x7F800000;
+static const u32 mantissa32 = 0x007FFFFF;
 
-global_variable f32 big_golden32 = 1.61803398875f;
-global_variable f32 small_golden32 = 0.61803398875f;
+static const f32 big_golden32 = 1.61803398875f;
+static const f32 small_golden32 = 0.61803398875f;
 
-global_variable f32  max_f32 = FLT_MAX;
-global_variable f64  max_f64 = DBL_MAX;
+static const f32 pi32 = 3.1415926535897f;
 
-global_variable f32  min_f32 = FLT_MIN;
-global_variable f64  min_f64 = DBL_MIN;
+static const f64 machine_epsilon64 = 4.94065645841247e-324;
 
-global_variable f32 pi32 = 3.1415926535897f;
+static const u8  max_u8  = 0xff;
+static const u16 max_u16 = 0xffff;
+static const u32 max_u32 = 0xffffffff;
+static const u64 max_u64 = 0xffffffffffffffffull;
 
-global_variable f64 machine_epsilon64 = 4.94065645841247e-324;
+static const i8  min_i8  =  (i8)0x80;
+static const i16 min_i16 = (i16)0x8000;
+static const i32 min_i32 = (i32)0x80000000;
+static const i64 min_i64 = (i64)0x8000000000000000ll;
 
-global_variable u64 max_u64 = 0xffffffffffffffffull;
-global_variable u32 max_u32 = 0xffffffff;
-global_variable u16 max_u16 = 0xffff;
-global_variable u8  max_u8  = 0xff;
+static const i8  max_i8  =  (i8)0x7f;
+static const i16 max_i16 = (i16)0x7fff;
+static const i32 max_i32 = (i32)0x7fffffff;
+static const i64 max_i64 = (i64)0x7fffffffffffffffll;
 
-global_variable i64 max_i64 = (i64)0x7fffffffffffffffll;
-global_variable i32 max_i32 = (i32)0x7fffffff;
-global_variable i16 max_i16 = (i16)0x7fff;
-global_variable i8  max_i8  =  (i8)0x7f;
+static const f32 max_f32 = FLT_MAX;
+static const f64 max_f64 = DBL_MAX;
 
-global_variable i64 min_i64 = (i64)0x8000000000000000ll;
-global_variable i32 min_i32 = (i32)0x80000000;
-global_variable i16 min_i16 = (i16)0x8000;
-global_variable i8  min_i8  =  (i8)0x80;
+static const f32 min_f32 = FLT_MIN;
+static const f64 min_f64 = DBL_MIN;
 
 typedef struct vec2_t{
     i32 x,y;
 }vec2_t;
 
-typedef struct vec2f_t{
+typedef struct vec2f_t
+{
     f32 x, y;
 }vec2f_t;
 
@@ -376,27 +607,28 @@ typedef struct vec4f_t
     f32 x, y, z, w;    
 }vec4f_t;
 
-#define MAT(m,r,c) (m)[(r)*4+(c)]
-#define SWAP_ROWS(a, b) { f32 *_tmp = a; (a)=(b); (b)=_tmp; }
-
 typedef struct mat4x4_t
 {
     f32 values[16];
 }mat4x4_t;
 
-/* 
-    3D rotations fundamentally have 3 degrees of freedom but can be represented in multiple ways, each with tradeoffs.
+#define MAT(m,r,c) (m)[(r)*4+(c)]
+#define SWAP_ROWS(a, b) {f32 *_tmp = a; (a)=(b); (b)=_tmp; }
 
-    Rotation matrices (3×3, storing 9 numbers)
+/* 
+    3D rotations fundamentally have 3 degrees of freedom 
+    but can be represented in multiple ways, each with tradeoffs.
+
+    - Rotation matrices (3×3, storing 9 numbers)
         are intuitive and easy to compose but suffer from numerical drift over time, 
         requiring expensive re-orthonormalization to maintain the six constraints
         that keep rows unit-length and perpendicular. 
 
-    Euler angles (yaw/pitch/roll, 3 numbers)
+    - Euler angles (yaw/pitch/roll, 3 numbers)
         are memory-efficient and drift-free since they have no constraints, 
         but suffer from gimbal lock and can't easily compose or interpolate rotations. 
 
-    Axis-angle representation (unit axis + angle, 4 numbers) 
+    - Axis-angle representation (unit axis + angle, 4 numbers) 
         elegantly captures Euler's theorem that any rotation is a single spin around some axis 
         and avoids gimbal lock, but still can't easily compose rotations or interpolate smoothly,
         plus has multiple representations for the same rotation.
@@ -543,6 +775,7 @@ f32 f_randnf(u32 index);
 u32 hash(u32 x);
 u32 unhash(u32 x);
 u32 djb2_hash(const char *str);
+u32 djb2_hash_append(u32 seed, const char *str);
 u32 fnv1a_hash(const char *str);
 u64 arith_mod(u64 x, u64 y);
 f32 d_sqrt(f32 number);
@@ -606,6 +839,7 @@ void quat_slerp(quat_t *quat1, quat_t *quat2, float slerp, quat_t *result);
 
 f64 apply_easing(f64 t, easing_type easing);
 void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type easing);
+void animation_stop(u64 id);
 void animation_update(f64 dt);
 bool animation_get(u64 id, f32 *current);
 void animation_pingpong(u64 id, f32 start, f32 target, f32 duration, easing_type easing);
