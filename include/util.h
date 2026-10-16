@@ -6,6 +6,7 @@
     #include <winnt.h>
     #include <uxtheme.h>
     #include <dwmapi.h>
+    #include <intrin.h>
 #else
     #include <pthread.h>
     #include <unistd.h>
@@ -23,11 +24,13 @@
 #include <stdbool.h>
 #include <locale.h>
 #include <assert.h>
+#include <stdarg.h>
 #include <math.h>
 #include <time.h>
 #include <float.h>
 
 #include <immintrin.h> 
+
 
 #define DEBUG            1
 #define LOG              1
@@ -109,7 +112,6 @@
     #define ALIGN_TO(x)
 #endif
 
-
 #if defined(_MSC_VER)
   #ifdef BUILDING_DLL
     #define MYAPI __declspec(dllexport)
@@ -172,32 +174,35 @@
 /* Warning Push/Pop and Disable */
 #if defined(_MSC_VER)
     #define WARNINGS_PUSH __pragma(warning(push))
+    #define WARNINGS_DISABLE_ALL_PUSH __pragma(warning(push, 0))
     #define WARNINGS_POP  __pragma(warning(pop))
-    #define DISABLE_WARNING_MSVC(warnCode) __pragma(warning(disable: warnCode))
-    #define DISABLE_WARNING_GCC(warnStr)
-    #define DISABLE_WARNING_CLANG(warnStr)
-
+    #define DISABLE_WARNING(warnCode) __pragma(warning(disable: warnCode))
 #elif defined(__clang__)
     #define WARNINGS_PUSH DO_PRAGMA(clang diagnostic push)
+    #define WARNINGS_DISABLE_ALL_PUSH DO_PRAGMA(clang diagnostic push) \
+                                      DO_PRAGMA(clang diagnostic ignored "-Weverything")
     #define WARNINGS_POP  DO_PRAGMA(clang diagnostic pop)
-    #define DISABLE_WARNING_MSVC(warnCode)
-    #define DISABLE_WARNING_GCC(warnStr)
-    #define DISABLE_WARNING_CLANG(warnStr) DO_PRAGMA(clang diagnostic ignored warnStr)
-
+    #define DISABLE_WARNING(warnStr) DO_PRAGMA(clang diagnostic ignored warnStr)
 #elif defined(__GNUC__)
     #define WARNINGS_PUSH DO_PRAGMA(GCC diagnostic push)
+    #define WARNINGS_DISABLE_ALL_PUSH DO_PRAGMA(GCC diagnostic push) \
+                                      DO_PRAGMA(GCC diagnostic ignored "-Wall") \
+                                      DO_PRAGMA(GCC diagnostic ignored "-Wextra") \
+                                      DO_PRAGMA(GCC diagnostic ignored "-Wpedantic")
     #define WARNINGS_POP  DO_PRAGMA(GCC diagnostic pop)
-    #define DISABLE_WARNING_MSVC(warnCode)
     #define DISABLE_WARNING_GCC(warnStr)   DO_PRAGMA(GCC diagnostic ignored warnStr)
-    #define DISABLE_WARNING_CLANG(warnStr)
-
 #else
     #define WARNINGS_PUSH
     #define WARNINGS_POP
-    #define DISABLE_WARNING_MSVC(warnCode)
-    #define DISABLE_WARNING_GCC(warnStr)
-    #define DISABLE_WARNING_CLANG(warnStr)
+    #define DISABLE_WARNING(warnCode)
 #endif
+
+#define fn                          static
+#define internal                    static
+#define local_persist               static
+#define global_variable             static
+
+#define c_linkage                   extern "c"
 
 #define TAB_SIZE                    4
 
@@ -248,6 +253,13 @@
     void foobar(int n) {
         if (n)
             foo(n);bar(n);
+
+        // equivalent to 
+        
+        if(n){
+            foo(n);
+        }
+        bar(n);
     }
 
     which may not be what is intended
@@ -255,11 +267,12 @@
 #define Stmnt(S)                    do{ S }while(0)
 
 
-#define AssertBreak()               (*(int*)0=0)  // should reliably crash
 
 #if DEBUG
-    #define Assert(c) Stmnt(if((!c)){AssertBreak();})
+    #define AssertBreak()            (*(int*)0=0)  // should reliably crash
+    #define Assert(c)                Stmnt(if((!c)){AssertBreak();})
 #else
+    #define AssertBreak()
     #define Assert(c)
 #endif
 
@@ -323,7 +336,8 @@ const char* enum_strings[] = {
 #define EPSILON_F64                     (1e-12)
 #define COMPARE_FLOATS(a,b,epsilon)     (fabs(a - b) <= epsilon * fabs(a))
 
-#define MASK(w,m,f)                     (w ^= (-f ^ w) & m)            // Conditionally set or clear bits  if (f) is true ->  w |= m; else w &= ~m;
+// Conditionally set or clear bits  if (f) is true ->  w |= m; else w &= ~m;
+#define MASK(w,m,f)                     (w ^= (-f ^ w) & m)            
 #define SIGN(v)                         ((v) > 0) - ((v) < 0)
 #define ABS(v)                          ((v < 0) ? -(unsigned)v : v)
 
@@ -473,40 +487,53 @@ const char* enum_strings[] = {
 #define abs_s64(v)                  (u64)llabs(v)
 
 #define sqrt_f32(v)                 sqrtf(v)
-#define cbrt_f32(v)                 cbrtf(v)
-#define mod_f32(a, b)               fmodf((a), (b))
-#define pow_f32(b, e)               powf((b), (e))
-#define ceil_f32(v)                 ceilf(v)
-#define floor_f32(v)                floorf(v)
-#define round_f32(v)                roundf(v)
-#define abs_f32(v)                  fabsf(v)
-#define radians_from_turns_f32(v)   ((v)*(2*3.1415926535897f))
-#define turns_from_radians_f32(v)   ((v)/(2*3.1415926535897f))
-#define degrees_from_turns_f32(v)   ((v)*360.f)
-#define turns_from_degrees_f32(v)   ((v)/360.f)
-#define degrees_from_radians_f32(v) (degrees_from_turns_f32(turns_from_radians_f32(v)))
-#define radians_from_degrees_f32(v) (radians_from_turns_f32(turns_from_degrees_f32(v)))
-#define sin_f32(v)                  sinf(radians_from_turns_f32(v))
-#define cos_f32(v)                  cosf(radians_from_turns_f32(v))
-#define tan_f32(v)                  tanf(radians_from_turns_f32(v))
-
 #define sqrt_f64(v)                 sqrt(v)
+
+// cube root
+#define cbrt_f32(v)                 cbrtf(v)
 #define cbrt_f64(v)                 cbrt(v)
+
+#define mod_f32(a, b)               fmodf((a), (b))
 #define mod_f64(a, b)               fmod((a), (b))
+
+#define pow_f32(b, e)               powf((b), (e))
 #define pow_f64(b, e)               pow((b), (e))
+
+#define ceil_f32(v)                 ceilf(v)
 #define ceil_f64(v)                 ceil(v)
+
+#define floor_f32(v)                floorf(v)
 #define floor_f64(v)                floor(v)
+
+#define round_f32(v)                roundf(v)
 #define round_f64(v)                round(v)
+
+#define abs_f32(v)                  fabsf(v)
 #define abs_f64(v)                  fabs(v)
+
+// 1 turn -> 2pi -> tau
+#define radians_from_turns_f32(v)   ((v)*(2*3.1415926535897f))
 #define radians_from_turns_f64(v)   ((v)*(2*3.1415926535897))
+#define turns_from_radians_f32(v)   ((v)/(2*3.1415926535897f))
 #define turns_from_radians_f64(v)   ((v)/(2*3.1415926535897))
+// 1 turn -> 360
+#define degrees_from_turns_f32(v)   ((v)*360.f)
 #define degrees_from_turns_f64(v)   ((v)*360.0)
+#define turns_from_degrees_f32(v)   ((v)/360.f)
 #define turns_from_degrees_f64(v)   ((v)/360.0)
+
+#define degrees_from_radians_f32(v) (degrees_from_turns_f32(turns_from_radians_f32(v)))
 #define degrees_from_radians_f64(v) (degrees_from_turns_f64(turns_from_radians_f64(v)))
+#define radians_from_degrees_f32(v) (radians_from_turns_f32(turns_from_degrees_f32(v)))
 #define radians_from_degrees_f64(v) (radians_from_turns_f64(turns_from_degrees_f64(v)))
+
+#define sin_f32(v)                  sinf(radians_from_turns_f32(v))
 #define sin_f64(v)                  sin(radians_from_turns_f64(v))
+#define cos_f32(v)                  cosf(radians_from_turns_f32(v))
 #define cos_f64(v)                  cos(radians_from_turns_f64(v))
+#define tan_f32(v)                  tanf(radians_from_turns_f32(v))
 #define tan_f64(v)                  tan(radians_from_turns_f64(v))
+
 
 typedef uint8_t     u8;
 typedef int8_t      i8;
@@ -523,12 +550,6 @@ typedef int64_t     i64;
 typedef float       f32;
 typedef double      f64;
 
-#define fn                  static
-#define internal            static
-#define local_persist       static
-#define global_variable     static
-
-#define c_linkage           extern "c"
 
 #ifdef _WIN32
     typedef HANDLE thread_handle_t;
@@ -615,6 +636,14 @@ typedef struct mat4x4_t
 #define MAT(m,r,c) (m)[(r)*4+(c)]
 #define SWAP_ROWS(a, b) {f32 *_tmp = a; (a)=(b); (b)=_tmp; }
 
+#define MAT2D_AT(base, i, j, dim_j) \
+    ((base) + ((u64)(i) * (u64)(dim_j) + (u64)(j)))
+
+#define MAT3D_AT(base, i, j, k, dim_j, dim_k) \
+    ((base) + (((u64)(i) * (u64)(dim_j) + (u64)(j)) * (u64)(dim_k) + (u64)(k)))
+
+#define MAT4D_AT(base, i, j, k, l, dim_j, dim_k, dim_l) \
+    ((base) + ((((u64)(i) * (u64)(dim_j) + (u64)(j)) * (u64)(dim_k) + (u64)(k)) * (u64)(dim_l) + (u64)(l)))
 /* 
     3D rotations fundamentally have 3 degrees of freedom 
     but can be represented in multiple ways, each with tradeoffs.
@@ -679,10 +708,21 @@ typedef struct {
     f64         elapsed;
     easing_type easing;
     bool        done;
+    f32        *dest;
 }animation_t;
 
+#define ANIM_PINGPONG_MAX       64
+typedef struct
+{
+    u64  id;
+    bool forward;
+} anim_pingpong_state_t;
+
+#define ANIM_CHAIN_MAX         32
+#define ANIM_CHAIN_MAX_STEPS    8
+
 typedef struct {
-    animation_t steps[8];  // fixed max chain length
+    animation_t steps[ANIM_CHAIN_MAX_STEPS];  // fixed max chain length
     i32  step_count;
     i32  current_step;
     u64  chain_id;               // unique ID for the chain itself
@@ -719,6 +759,11 @@ extern i32 anim_chain_count;
 
 anim_rank_t anim_ranks[ANIM_RANK_MAX];
 i32         anim_rank_count;
+
+typedef struct 
+{
+    atomic_int_t locked;
+} spinlock_t;
 
 typedef void (*job_func_t)(void* data);
 
@@ -838,7 +883,7 @@ void quat_slerp(quat_t *quat1, quat_t *quat2, float slerp, quat_t *result);
 
 
 f64 apply_easing(f64 t, easing_type easing);
-void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type easing);
+bool animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type easing);
 void animation_stop(u64 id);
 void animation_update(f64 dt);
 bool animation_get(u64 id, f32 *current);
@@ -861,6 +906,7 @@ void morph_stop(poly_morph_t *m);
 
 f64 get_time_difference(void *last_time);
 void get_time(void *time);
+void precise_sleep(f64 seconds);
 
 thread_handle_t create_thread(thread_func_t func, thread_func_param_t data);
 void join_thread(thread_handle_t thread);
@@ -891,7 +937,7 @@ void check_process_output_async(process_t *proc);
 int check_process_status_async(process_t *proc);
 
 const char* get_file_extension(const char *filepath);
-unsigned char* read_file(const char* font_path);
+char* read_file(const char* font_path);
 void skip_whitespace_and_commas(const char **p);
 int parse_float(const char **p, float *out);
 int parse_two_floats(const char **p, float *x, float *y);

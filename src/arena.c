@@ -1,5 +1,45 @@
 #include "arena.h"
 
+#if ARENA_DEBUG
+typedef struct{
+    void       *ptr;  
+    size_t      size; 
+    size_t      size_aligned;
+    const char *file;
+    int         line;
+} arena_alloc_record_t;
+
+typedef struct 
+{
+    arena_alloc_record_t records[ARENA_DEBUG_MAX_RECORDS];
+    int                  count;
+    int                  overflow;
+} arena_debug_log_t;
+
+typedef struct{
+    size_t used_bytes;     
+    size_t capacity_bytes; 
+    float  utilization;    
+    int    is_current;     
+} arena_block_stats_t;
+
+typedef struct arena_debug_snapshot_t 
+{
+    arena_block_stats_t *blocks;      // array, index 0 = blocks_head (newest)
+    int                  block_count;
+
+    size_t total_used_bytes;
+    size_t total_capacity_bytes;
+    float  overall_utilization;       // total_used / total_capacity
+
+    int     free_list_count;          
+    int     free_list_threshold;      
+
+    long    malloc_calls;             
+    int     current_block_index;      
+} arena_debug_snapshot_t;
+#endif
+
 /* 
     Processors typically read memory at its "word size" 
     i.e read 8-bytes at a time in a 64-bit machine for example.
@@ -11,10 +51,10 @@
 
     This union -taken from (cii)- or alignof(max_align_t) (not supported in MSVC ??) 
     attempts to give the minimum alignment on the host machine. 
-    Its fields are those that are most likely to have the strictest alignment requirements,
-    and it is used to round up the number of bytes required for allocation
-    This ensures that any memory block large enough to hold a "union align"
-    can store any of these types without causing alignment issues.
+    Its fields are those that are most likely to have the strictest alignment 
+    requirements, and it is used to round up the number of bytes required for 
+    allocation This ensures that any memory block large enough to hold a 
+    "union align" can store any of these types without causing alignment issues.
 */
 union align {
     int i;
@@ -26,29 +66,28 @@ union align {
     double d;
     long double ld;     // typically this one 
 };
-#define ALIGNED_PTR(ptr) (((size_t)(ptr))%(sizeof (union align)) == 0)
-#define ALIGN(n)         (((n) + sizeof (union align) - 1)/(sizeof (union align)))*(sizeof (union align))
 
-/*
-    The arena structure represents a linked list of allocated memory "blocks".
-*/
 
 typedef struct arena_block_t
 {
     struct arena_block_t *next;   // points to the head of the block
-    byte *used;             // points to the block's first free location (just past the used section).
-    byte *capacity;         // points just past the end of the block.
+    byte *used;                   // points to the block's first free location (just past the used section).
+    byte *capacity;               // points just past the end of the block.
 }arena_block_t;
 
 
+/*
+    The arena structure represents a linked list of allocated memory "blocks".
+*/
 typedef struct arena_t{
-    arena_block_t *current_block; // Always try to allocate here first
-    arena_block_t *blocks_head;   // Head of all allocated blocks for freeing later
+    arena_block_t *current_block; 
+    arena_block_t *blocks_head;   
     long mem_allocs;
+#if ARENA_DEBUG
+    arena_debug_log_t *dbg_log;
+#endif
 }arena_t;
 
-
-#define ARENA_FREE_SPACE(a) ((a) ? (a)->capacity - (a)->used : 0)
 
 /* 
     The union header ensures that we start allocating memory 
@@ -60,27 +99,116 @@ union arena_header
     union align a;  // ensure we start allocating from a properly aligned address.
 };
 
-// skip the header to reach usable pool bytes
-#define ARENA_MEM_BLOCK(p) (byte *)((union arena_header *)p + 1)
 
-// We keep a few free blocks on a free list emanating from "head"
-// to reduce the number of times we must call malloc and free.
-// This list is threaded through the next fields of the blocks
-// initial arena structures and is shared between them
+/* 
+    We keep a few free blocks on a free list emanating from "head"
+    to reduce the number of times we must call malloc and free.
+    This list is threaded through the next fields of the blocks
+    initial arena structures and is shared between them 
+*/
 static struct
 {
     arena_block_t *head;
-    int n;          // the number of blocks on the list.
+    int n;               // the number of blocks on the list.
 }arena_free_list;
 
-// TODO: find a way to make this work!, I currently have no idea from which block
-// I allocate memory so its not entirely obvious, but what I imagine is a way to
-// reset a region of the arena not the entire arena 
 typedef struct arena_checkpoint_t
 {
     arena_block_t *block;         // the currently used block
     byte          *used;          // the point we wish to go back to 
 }arena_checkpoint_t;
+
+#if ARENA_DEBUG
+void arena_debug_enable(arena_t *arena)
+{
+    assert(arena);
+    arena->dbg_log = calloc(1, sizeof(arena_debug_log_t));
+    assert(arena->dbg_log);
+}
+
+void arena_debug_disable(arena_t *arena)
+{
+    assert(arena);
+    free(arena->dbg_log);
+    arena->dbg_log = NULL;
+}
+
+arena_debug_snapshot_t arena_debug_snapshot(const arena_t *arena)
+{
+    arena_debug_snapshot_t snap = {0};
+    snap.free_list_count        = arena_free_list.n;
+    snap.free_list_threshold    = THRESHOLD;
+    snap.malloc_calls           = arena->mem_allocs;
+    snap.current_block_index    = -1;
+
+    /* Count blocks */
+    int n = 0;
+    const arena_block_t *b = arena->blocks_head;
+    while (b) { n++; b = b->next; }
+
+    snap.block_count = n;
+    if (n == 0) return snap;
+
+    snap.blocks = malloc(n * sizeof(arena_block_stats_t));
+    assert(snap.blocks);
+
+    b = arena->blocks_head;
+    for (int i = 0; i < n; i++, b = b->next)
+    {
+        size_t cap  = (size_t)(b->capacity - (byte*)b) - HEADER_SIZE;
+        size_t used = (size_t)(b->used     - (byte*)b) - HEADER_SIZE;
+
+        snap.blocks[i].capacity_bytes = cap;
+        snap.blocks[i].used_bytes     = used;
+        snap.blocks[i].utilization    = cap > 0 ? (float)used / (float)cap : 0.0f;
+        snap.blocks[i].is_current     = (b == arena->current_block);
+
+        if (snap.blocks[i].is_current)
+            snap.current_block_index = i;
+
+        snap.total_used_bytes     += used;
+        snap.total_capacity_bytes += cap;
+    }
+
+    snap.overall_utilization = snap.total_capacity_bytes > 0
+        ? (float)snap.total_used_bytes / (float)snap.total_capacity_bytes
+        : 0.0f;
+
+    return snap;
+}
+
+void arena_debug_snapshot_free(arena_debug_snapshot_t *snap)
+{
+    if (snap && snap->blocks)
+    {
+        free(snap->blocks);
+        snap->blocks      = NULL;
+        snap->block_count = 0;
+    }
+}
+
+void arena_debug_rec_register(arena_t *arena, byte* ptr, long nbytes, 
+                              long nbytes_original, const char* file, int line)
+{
+    if (arena->dbg_log)
+    {
+        arena_debug_log_t *log = arena->dbg_log;
+        if (log->count < ARENA_DEBUG_MAX_RECORDS)
+        {
+            arena_alloc_record_t *rec = &log->records[log->count++];
+            rec->ptr          = ptr;
+            rec->size         = (size_t)nbytes_original;
+            rec->size_aligned = (size_t)nbytes;
+            rec->file         = file;   // string literals live forever, safe to point
+            rec->line         = line;
+        }
+        else
+        {
+            log->overflow = 1;
+        }
+    }
+}
+#endif
 
 /*
     Allocate memory for the arena structure head.
@@ -96,7 +224,9 @@ arena_t* arena_new(void)
     arena->current_block = NULL;
     arena->blocks_head   = NULL;
     arena->mem_allocs    = 0;
-    
+#if ARENA_DEBUG
+    arena_debug_enable(arena);
+#endif
     return arena;
 }
 
@@ -148,6 +278,7 @@ void arena_push_block(arena_t *arena, arena_block_t *new_block, byte *cap)
     arena->current_block = new_block;
 }
 
+
 /* 
     Round the requested amount up to the proper alignment boundary,
     increment the "used" pointer by the amount of the rounded request,
@@ -160,12 +291,10 @@ void arena_push_block(arena_t *arena, arena_block_t *new_block, byte *cap)
 
 void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file, int line) 
 {
-    (void) file;
-    (void) line;
-    
     assert(arena);
     assert(nbytes > 0);
 
+    long nbytes_original = nbytes;
     // round the requested allocation to the alignment boundary
     nbytes = ALIGN(nbytes);
 
@@ -176,6 +305,9 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
     {
         byte *ptr = arena->current_block->used;
         arena->current_block->used += nbytes;
+        #if ARENA_DEBUG
+        arena_debug_rec_register(arena, ptr, nbytes, nbytes_original, file, line);
+        #endif
         return ptr;
     }
 
@@ -225,6 +357,9 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
     {
         byte *ptr = best_fit_block->used;
         best_fit_block->used += nbytes;
+        #if ARENA_DEBUG
+        arena_debug_rec_register(arena, ptr, nbytes, nbytes_original, file, line);
+        #endif
         return ptr;
     }
 
@@ -271,6 +406,9 @@ void *arena_alloc(arena_t *arena, long nbytes, bool first_fit, const char *file,
     arena_push_block(arena, new_block, cap);
     byte *ptr = new_block->used;
     new_block->used += nbytes;
+    #if ARENA_DEBUG
+    arena_debug_rec_register(arena, ptr, nbytes, nbytes_original, file, line);
+    #endif
     return ptr;
 }
 
@@ -282,8 +420,6 @@ void *arena_calloc(arena_t *arena, long count, long nbytes, const char *file, in
     memset(ptr, 0, count*nbytes);
     return ptr;
 }
-
-#define THRESHOLD 10
 
 void arena_free_block(arena_block_t *block)
 {
@@ -327,6 +463,7 @@ void arena_reset(arena_t *arena)
     // Restore primary targeting to the last block pushed (head of the list)
     arena->current_block = arena->blocks_head; 
 }
+
 /* 
     An arena is deallocated by adding its blocks to the list of free blocks,
     which also restores *arena to its initial state as the list is traversed
@@ -360,47 +497,46 @@ void arena_free(arena_t *arena)
     }
 
     // should get set automatically by the last chunk
-arena->blocks_head = NULL;
+    arena->blocks_head = NULL;
     arena->current_block = NULL;
 }
 
-arena_checkpoint_t arena_save(arena_t *arena)
+arena_checkpoint_t *arena_save(arena_t *arena)
 {
     assert(arena);
-    arena_checkpoint_t checkpoint;
+    arena_checkpoint_t *cp = malloc(sizeof(*cp));
+    assert(cp);
     
     // Record where we are currently writing out data
-    checkpoint.block = arena->current_block;
-    checkpoint.used  = arena->current_block ? arena->current_block->used : NULL;
+    cp->block = arena->current_block;
+    cp->used  = arena->current_block ? arena->current_block->used : NULL;
     
-    return checkpoint;
+    return cp;
 }
 
-void arena_restore(arena_t *arena, arena_checkpoint_t checkpoint) 
+void arena_restore(arena_t *arena, arena_checkpoint_t *cp) 
 {
     assert(arena);
 
     // If the checkpointed block is NULL, it means we are reverting all the way 
     // back to the start of the very first block (entire arena reset)
-    if (!checkpoint.block) {
+    if (!cp->block) {
         arena_reset(arena);
+        free(cp);
         return;
     }
 
-    // 1. Roll back the write cursor inside the targeted checkpoint block
-    assert(checkpoint.used >= ARENA_MEM_BLOCK(checkpoint.block));
-    assert(checkpoint.used <= checkpoint.block->capacity);
-    checkpoint.block->used = checkpoint.used;
+    assert(cp->used >= ARENA_MEM_BLOCK(cp->block));
+    assert(cp->used <= cp->block->capacity);
+    cp->block->used = cp->used;
 
-    // Because new blocks are pushed to the HEAD of the list, these "newer" 
-    // blocks exist in the chain BEFORE the checkpoint block.
     arena_block_t *current = arena->blocks_head;
-    while (current && current != checkpoint.block) 
+    while (current && current != cp->block) 
     {
-        // Reset this block's cursor back to its absolute beginning (just past its header)
         current->used = ARENA_MEM_BLOCK(current);
         current = current->next;
     }
 
-    arena->current_block = checkpoint.block;
+    arena->current_block = cp->block;
+    free(cp);
 }

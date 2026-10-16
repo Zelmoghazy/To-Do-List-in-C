@@ -491,7 +491,6 @@ text_layout_t* create_text_layout(font_tt *font, const char *text)
 
 void wrap_text_const(text_layout_t *layout, float max_width, char *out, size_t out_len, int *line_n, float *max_line_w)
 {
-    
     if (!layout || max_width <= 0) {
         snprintf(out, out_len, "(null)");
     }
@@ -577,6 +576,43 @@ void free_text_layout(text_layout_t *layout)
     free(layout);
 }
 
+/* 
+    UTF-8
+    Each element are between 1 -> 4 bytes wide
+    - 1st byte : leading byte
+    - rest (if applicable) : continuation bytes
+    
+    - for each byte
+        - Check MSB
+            - if it is zero : 
+                - the element is a single byte ascii character
+            - if it is 1 :
+                - we know its a multibyte element
+                    - if the next bit is also 1 -> we know its the leading byte
+                        - if the most significant bits:
+                            - 3-bits are (110)   0xC/0xD : 2-byte code point
+                            - 4-bits are (1110)  0xE     : 3-byte code point
+                            - 5-bits are (11110) 0xF     : 4-byte code point
+                            (number of leading ones correspond to the number of bytes)
+                    - if the next bit is 0 -> we know its continuation byte
+                    (only have to seek 3 bytes backwards maximum before reaching the leading byte)
+ */
+
+#define UTF8_1B(b)              (b < 0x80)
+#define UTF8_2B(b)              ((b & 0xE0) == 0xC0)
+#define UTF8_3B(b)              ((b & 0xF0) == 0xE0)
+#define UTF8_4B(b)              ((b & 0xF8) == 0xF0)
+
+#define UTF8_PAYLOAD_LEAD_2B(b) (b & 0x1F)
+#define UTF8_PAYLOAD_LEAD_3B(b) (b & 0x0F)
+#define UTF8_PAYLOAD_LEAD_4B(b) (b & 0x07)
+#define UTF8_PAYLOAD_CONT(cp,b) (cp << 6) | (b & 0x3F) // skip the 10
+
+#define UTF8_INVALID(cp)        (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+#define UTF8_OVERLONG(cp, b)    (b == 2 && cp < 0x80)  || \
+                                (b == 3 && cp < 0x800) || \
+                                (b == 4 && cp < 0x10000)
+
 void utf8_decoder_init(utf8_decoder_t *decoder, const char *str)
 {
     decoder->str = str;
@@ -586,72 +622,116 @@ void utf8_decoder_init(utf8_decoder_t *decoder, const char *str)
 int utf8_decode_next(utf8_decoder_t *decoder, u32 *out_char)
 {
     const char *s = decoder->str + decoder->pos;
-    if (*s == '\0') return 0;
-    
+    if (*s == '\0') {
+        return 0;
+    }
+
     unsigned char c = (unsigned char)*s;
-    u32 codepoint;
-    int bytes;
+    u32 codepoint = 0;
+    int bytes = -1;
     
-    if (c < 0x80) {
-        // 1-byte sequence
+    /*
+        1-byte sequence : all ascii characters 
+     */
+    if (UTF8_1B(c)) 
+    {
         codepoint = c;
         bytes = 1;
-    } else if ((c & 0xE0) == 0xC0) {
-        // 2-byte sequence
-        codepoint = c & 0x1F;
+    } 
+
+    /*
+        2-byte sequence : greek , cyrillic , arabic, some symbols 
+     */
+    else if (UTF8_2B(c)) 
+    {
+        codepoint = UTF8_PAYLOAD_LEAD_2B(c);
         bytes = 2;
-    } else if ((c & 0xF0) == 0xE0) {
-        // 3-byte sequence
-        codepoint = c & 0x0F;
+    } 
+    /*
+        3-byte sequence : Chinese, japanese, korean
+     */
+    else if (UTF8_3B(c)) 
+    {
+        codepoint = UTF8_PAYLOAD_LEAD_3B(c);
         bytes = 3;
-    } else if ((c & 0xF8) == 0xF0) {
-        // 4-byte sequence
-        codepoint = c & 0x07;
+    } 
+    /*
+        4-byte sequence : emoji 
+     */
+    else if (UTF8_4B(c)) 
+    {
+        codepoint = UTF8_PAYLOAD_LEAD_4B(c);
         bytes = 4;
-    } else {
+    } 
+    else 
+    {
         // Invalid UTF-8
         *out_char = '?';
         decoder->pos++;
-        return 1;
+        return -1;
     }
     
     // Decode continuation bytes
     for (int i = 1; i < bytes; i++) 
     {
         c = (unsigned char)s[i];
-        if ((c & 0xC0) != 0x80) {
+        if (c == '\0') {
+            *out_char = '?';
+            decoder->pos += i; 
+            return -1;
+        }
+        if ((c & 0xC0) != 0x80) 
+        {
             // Invalid continuation byte
             *out_char = '?';
             decoder->pos++;
-            return 1;
+            return -1;
         }
-        codepoint = (codepoint << 6) | (c & 0x3F);
+        codepoint = UTF8_PAYLOAD_CONT(codepoint,c); 
     }
     
-    // Check for overlong encoding
-    if ((bytes == 2 && codepoint < 0x80) ||
-        (bytes == 3 && codepoint < 0x800) ||
-        (bytes == 4 && codepoint < 0x10000)) 
+    /*
+        A Unicode code point must be encoded using the minimum number of bytes possible. 
+        ascii shouldnt take 2 bytes for example
+     */
+    if (UTF8_OVERLONG(codepoint, bytes)) 
     {
-        *out_char = '?';
+        *out_char = '?'; // TODO: switch to EF BF BD
         decoder->pos++;
-        return 1;
+        return -1;
     }
     
     // Check for invalid codepoints
-    if (codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) 
+    if (UTF8_INVALID(codepoint)) 
     {
         *out_char = '?';
         decoder->pos += bytes;
-        return 1;
+        return -1;
     }
     
     *out_char = codepoint;
     decoder->pos += bytes;
+
     return bytes;
 }
 
-void init_unicode_support()
+size_t utf8_strlen(const char *utf8_str)
+{
+    if (!utf8_str) return 0;
+    
+    size_t count = 0;
+    utf8_decoder_t decoder;
+    utf8_decoder_init(&decoder, utf8_str);
+    
+    u32 wc;
+    while (utf8_decode_next(&decoder, &wc)) {
+        count++;
+    }
+    
+    return count;
+}
+
+void init_unicode_support(void)
 {
     #ifdef _WIN32
         SetConsoleOutputCP(CP_UTF8);
@@ -722,22 +802,6 @@ void render_string_unicode(image_view_t const *color_buf, rendered_text_tt *text
             x += glyph->advance;
         }
     }
-}
-
-size_t utf8_strlen(const char *utf8_str)
-{
-    if (!utf8_str) return 0;
-    
-    size_t count = 0;
-    utf8_decoder_t decoder;
-    utf8_decoder_init(&decoder, utf8_str);
-    
-    u32 wc;
-    while (utf8_decode_next(&decoder, &wc)) {
-        count++;
-    }
-    
-    return count;
 }
 
 path_data_t* load_glyph_curves(font_tt *font, const char *font_path, char character) 

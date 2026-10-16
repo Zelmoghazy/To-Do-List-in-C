@@ -35,21 +35,57 @@
 #include "./include/base_graphics.h"
 #include "./include/font.h"
 #include "./include/todo.h"
+#include "./include/borderless.h"
+#include "./include/titlebar.h"
 
 #include "./src/util.c"
 #include "./src/arena.c"
 #include "./src/base_graphics.c"
 #include "./src/font.c"
 #include "./src/todo.c"
+#include "./src/borderless.c"
+#include "./src/titlebar.c"
 
-__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;// Optimus: force switch to discrete GPU
-__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;//AMD
+__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;       // Optimus: force switch to discrete GPU
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1; //AMD
+
+#ifndef GL_MULTISAMPLE
+	#define GL_MULTISAMPLE 0x809D
+#endif
 
 #define FRAME_HISTORY_SIZE  64
-#define BUFFER_SIZE         512
+#define SCRATCH_BUF_SIZE    512
 #define MAX_BLOCKS          256
+#define ANIMATION_TIME      0.1f
+#define TEXT_BUFFER_MAX     512
 
-#define ANIMATION_TIME      0.2f
+enum { TITLEBAR_FILE = 1, TITLEBAR_EDIT };
+
+static const struct caption_button buttons[] = 
+{
+	{ .kind = CAPTION_CUSTOM,   .anchor = CAPTION_LEFT,  .width = 44, .id = TITLEBAR_FILE, .label = "File" },
+	{ .kind = CAPTION_CUSTOM,   .anchor = CAPTION_LEFT,  .width = 44, .id = TITLEBAR_EDIT, .label = "Edit" },
+	{ .kind = CAPTION_MINIMIZE, .anchor = CAPTION_RIGHT, .width = 46 },
+	{ .kind = CAPTION_MAXIMIZE, .anchor = CAPTION_RIGHT, .width = 46 },
+	{ .kind = CAPTION_CLOSE, 	.anchor = CAPTION_RIGHT, .width = 46 },
+};
+
+static const struct titlebar_style style = 
+{
+	.height = 24,
+	.background = { 41, 41, 46, 255 },
+	.glyph = { 255, 255, 255, 255 },
+	.button = {
+		.normal = { 0, 0, 0, 0 },
+		.hover = { 255, 255, 255, 25 },
+		.pressed = { 255, 255, 255, 46 },
+	},
+	.close = {
+		.normal = { 0, 0, 0, 0 },
+		.hover = { 232, 18, 36, 255 },
+		.pressed = { 181, 15, 31, 255 },
+	},
+};
 
 /*
     Stuff that we wish to retain between frames
@@ -58,6 +94,7 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;//AMD
 typedef struct 
 {
     i32 scroll_x, scroll_y;
+    // TODO: both shouldnt be here, responsibility of builder code
     f32  value;
     bool toggled;
 } ui_block_state_t;
@@ -77,10 +114,12 @@ typedef enum {
     UI_INTERACT_CLICKED,
 } ui_interact_mode_t;
 
-typedef struct {
+typedef struct 
+{
     u64                 hot_id;        
     u64                 active_id;     
     u64                 released_id;
+
     ui_interact_mode_t  mode;
     f32                 drag_start_x;
     f32                 drag_start_y;
@@ -158,14 +197,12 @@ typedef struct ui_block_t
     bool visible;
 
     bool clickable;
-
     bool scrollable;
-
     bool draggable;
-
     bool resizeable;
-
     bool toggleable;
+    bool moveable;
+
     bool toggled;
 
     f32 value;
@@ -228,10 +265,9 @@ typedef struct
     ui_interaction_t interaction;
 } ui_context_t;
 
-#define TEXT_BUFFER_MAX 512
-
 typedef struct 
 {
+    // TODO: should be the user responsibility why do I keep state?
     char buffer[TEXT_BUFFER_MAX];
     i32 buffer_len;
     i32 cursor_pos;
@@ -264,9 +300,15 @@ struct context_t
 {
     void               *window;
 
-    image_view_t        draw_buffer;
-    u32                 screen_width;
+    image_view_t        frame_buffer;   // whole client area, title bar included
+    image_view_t        draw_buffer;    // view into frame_buffer below the title bar
+    u32                 window_width;   // size of frame_buffer
+    u32                 window_height;
+    u32                 screen_width;   // size of draw_buffer
     u32                 screen_height;
+    i32                 titlebar_height;
+    u32                 max_width;
+    u32                 max_height;
 
     GLuint              texture;
     GLuint              read_fbo;
@@ -293,6 +335,8 @@ struct context_t
     char                input_char_queue[32];
     i32                 input_char_count;
 
+    struct titlebar     titlebar;
+    struct borderless   *bw;
     ui_context_t        *ui_ctx;
     ui_block_map_t      *block_map;
     text_edit_map_t     *text_map;
@@ -315,6 +359,8 @@ struct context_t
     bool                dock;
     bool                capture;
     bool                profile;
+    bool                arena_dbg;
+    bool                post_fx;
     bool                changed;
     bool                debug;
 
@@ -346,9 +392,9 @@ struct context_t
     arena_t             *persistent_arena;  // Survives reloads
 }gc;
 
-char frametime[BUFFER_SIZE];
+char frametime[SCRATCH_BUF_SIZE];
 
-char prof_buf[64][BUFFER_SIZE];
+char prof_buf[64][SCRATCH_BUF_SIZE];
 i32 prof_buf_count;
 
 void render_all(void);
@@ -403,6 +449,7 @@ bool manipulator_axis_x(u32* x, u32 rad)
 
     return false;
 }
+
 void set_dark_mode(GLFWwindow *window)
 {
     #ifdef _WIN32
@@ -423,7 +470,7 @@ void set_window_icon(char *path)
         glfwSetWindowIcon(gc.window, 1, &icon);
         stbi_image_free(icon.pixels);
     } else {
-        fprintf(stderr, "Error : Failed to load window icon\n");
+        LOG_ERR("Failed to load window icon.");
     }
 }
 
@@ -433,7 +480,7 @@ void prof_record_results(void)
     {
         if (g_prof_storage.entries[i].hit_count > 0) 
         {
-            snprintf(prof_buf[i], BUFFER_SIZE, "- %s[%llu]: %.6f ms (total)", 
+            snprintf(prof_buf[i], SCRATCH_BUF_SIZE, "- %s[%llu]: %.6f ms (total)", 
                    g_prof_storage.entries[i].label,
                    (u64)g_prof_storage.entries[i].hit_count,
                    g_prof_storage.entries[i].elapsed_ms);
@@ -471,6 +518,114 @@ void render_prof_entries(void)
 
 }
 
+#define ARENA_PANEL_PADDING 8
+#define ARENA_PANEL_BAR_HEIGHT 12
+#define ARENA_PANEL_BAR_WIDTH 180
+#define ARENA_PANEL_ROW_GAP 4
+
+static char arena_panel_buf[64][128];
+static int  arena_panel_buf_count = 0;
+
+#define ARENA_DBG_PANEL_PUSH(fmt, ...) \
+    do { \
+        if(arena_panel_buf_count < 64) \
+            snprintf(arena_panel_buf[arena_panel_buf_count++], 128, fmt, ##__VA_ARGS__); \
+    } while(0)
+
+void render_arena_dbg_panel(const arena_t *arena, i32 x, i32 y)
+{
+    arena_panel_buf_count = 0;
+
+    arena_debug_snapshot_t snap = arena_debug_snapshot(arena);
+
+    i32 line_h  = get_line_height(gc.font);
+    i32 row_h   = line_h + ARENA_PANEL_ROW_GAP;
+
+    /* ---- build text lines ---- */
+    ARENA_DBG_PANEL_PUSH("Arena  blocks:%d  mallocs:%ld", snap.block_count, snap.malloc_calls);
+    ARENA_DBG_PANEL_PUSH("Total  %zu / %zu bytes  (%.1f%%)",
+        snap.total_used_bytes,
+        snap.total_capacity_bytes,
+        snap.overall_utilization * 100.0f);
+    ARENA_DBG_PANEL_PUSH("FreeList  %d / %d",
+        snap.free_list_count,
+        snap.free_list_threshold);
+
+    for(int i = 0; i < snap.block_count; i++)
+    {
+        const arena_block_stats_t *b = &snap.blocks[i];
+        ARENA_DBG_PANEL_PUSH("  [%d]%s %zu / %zu bytes",
+            i,
+            b->is_current ? "*" : " ",
+            b->used_bytes,
+            b->capacity_bytes);
+    }
+
+    i32 text_width = 0;
+    for(int i = 0; i < arena_panel_buf_count; i++)
+        text_width = MAX(text_width, (i32)get_string_width(gc.font, arena_panel_buf[i]));
+
+    i32 panel_w = MAX(text_width, ARENA_PANEL_BAR_WIDTH) + ARENA_PANEL_PADDING * 2;
+
+    i32 panel_h = ARENA_PANEL_PADDING * 2
+                + row_h * 3
+                + (row_h + ARENA_PANEL_BAR_HEIGHT + ARENA_PANEL_ROW_GAP) * snap.block_count;
+
+    draw_rect_solid_wh(&gc.draw_buffer,
+        x, y, panel_w, panel_h,
+        HEX_TO_COLOR4(0x282a36));
+
+    PROFILE("Rendering arena panel")
+    {
+        i32 cx = x + ARENA_PANEL_PADDING;
+        i32 cy = y + ARENA_PANEL_PADDING;
+
+        for(int i = 0; i < 3; i++)
+        {
+            rendered_text_tt text = {
+                .font   = gc.font,
+                .pos    = {.x = cx, .y = cy},
+                .color  = COLOR_WHITE,
+                .string = arena_panel_buf[i]
+            };
+            render_text_tt(&gc.draw_buffer, &text);
+            cy += row_h;
+        }
+
+        for(int i = 0; i < snap.block_count; i++)
+        {
+            const arena_block_stats_t *b = &snap.blocks[i];
+
+            rendered_text_tt text = {
+                .font   = gc.font,
+                .pos    = {.x = cx, .y = cy},
+                .color  = b->is_current ? HEX_TO_COLOR4(0xf1fa8c) : COLOR_WHITE,
+                .string = arena_panel_buf[3 + i]
+            };
+            render_text_tt(&gc.draw_buffer, &text);
+            cy += row_h;
+
+            draw_rect_solid_wh(&gc.draw_buffer,
+                cx, cy,
+                ARENA_PANEL_BAR_WIDTH, ARENA_PANEL_BAR_HEIGHT,
+                HEX_TO_COLOR4(0x44475a));
+
+            i32 fill_w = (i32)(b->utilization * ARENA_PANEL_BAR_WIDTH);
+            color4_t fill_color = b->utilization > 0.85f ? HEX_TO_COLOR4(0xff5555)
+                              : b->utilization > 0.60f ? HEX_TO_COLOR4(0xffb86c)
+                              :                          HEX_TO_COLOR4(0x50fa7b);
+            draw_rect_solid_wh(&gc.draw_buffer,
+                cx, cy,
+                fill_w, ARENA_PANEL_BAR_HEIGHT,
+                fill_color);
+
+            cy += ARENA_PANEL_BAR_HEIGHT + ARENA_PANEL_ROW_GAP;
+        }
+    }
+
+    arena_debug_snapshot_free(&snap);
+}
+
 void reset_input_for_frame(void) 
 {
     for (i32 i = 0; i < GLFW_KEY_LAST; i++) {
@@ -480,18 +635,38 @@ void reset_input_for_frame(void)
     gc.ui_ctx->interaction.released_id = 0; 
 }
 
+/*
+    Only tell GLFW when the cursor changes. glfwSetCursor applies the cursor
+    immediately whenever the mouse is inside the client rect, and with the
+    borderless window that includes the resize borders, so calling it every
+    frame fights the resize cursor Windows sets there.
+ */
+void set_cursor(GLFWcursor *cursor)
+{
+    static GLFWcursor *current;
+    if (cursor != current) {
+        glfwSetCursor(gc.window, cursor);
+        current = cursor;
+    }
+}
+
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
     (void)window;
-    gc.screen_width  = width;
-    gc.screen_height = height;
+    gc.window_width  = width;
+    gc.window_height = height;
 
-    glViewport(0, 0, gc.screen_width, gc.screen_height);
+    // The UI only gets the part of the window below the title bar
+    gc.titlebar_height = MIN(caption_buttons_height(&gc.titlebar.caption), height);
+    gc.screen_width    = width;
+    gc.screen_height   = height - gc.titlebar_height;
+
+    glViewport(0, 0, gc.window_width, gc.window_height);
 }
 
 void error_callback(int error, const char* description) 
 {
-    fprintf(stderr, "GLFW Error %d: %s\n", error, description);
+    LOG_ERR("GLFW Error %d: %s", error, description);
 }
 
 void window_refresh_callback(GLFWwindow* window)
@@ -503,7 +678,7 @@ void drop_callback(GLFWwindow* window, int count, const char** paths)
 {
     (void)window;
     for (int i = 0; i < count; i++){
-        printf("Dropped file: %s\n", paths[i]);
+        LOG_DEBUG("Dropped file: %s", paths[i]);
     }
 }
 
@@ -527,8 +702,9 @@ void mouse_callback(GLFWwindow* window, f64 xpos, f64 ypos)
 {
     (void)window;
 
-    gc.mouse_x = (u32)xpos;
-    gc.mouse_y = (u32)ypos;
+    // Relative to draw_buffer, so negative over the title bar
+    gc.mouse_x = (i32)xpos;
+    gc.mouse_y = (i32)ypos - gc.titlebar_height;
 
     f32 xoffset, yoffset;
     get_mouse_delta(&xoffset, &yoffset);
@@ -596,6 +772,9 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
                 break;
             case GLFW_KEY_F11:
                 gc.profile ^= 1;
+                break;
+            case GLFW_KEY_F12:
+                gc.arena_dbg ^= 1;
                 break;
             case GLFW_KEY_F10:
                 gc.capture = true;
@@ -687,7 +866,7 @@ void ui_new_frame(ui_context_t *ctx)
 ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width, u32 height, layout_t layout)
 {
     if (ctx->block_count >= MAX_BLOCKS){
-        fprintf(stderr, "Error : failed to add a new block, exceeded maximum number of blocks");
+        LOG_ERR("failed to add a new block, exceeded maximum number of blocks");
         return NULL;
     } 
     
@@ -698,7 +877,7 @@ ui_block_t* ui_new_block(ui_context_t *ctx, char *title, i32 x, i32 y, u32 width
     // check for duplicates
     for (i32 i = 0; i < ctx->block_count; i++){
         if (ctx->blocks[i]->id == block->id){
-            fprintf(stderr, "Error : failed to add a new block, duplicate ID");
+            LOG_ERR("failed to add a new block, duplicate ID");
             return NULL;
         }
     }
@@ -874,7 +1053,7 @@ void ui_draw_rounded_rect_in_block(ui_block_t *block, i32 block_x, i32 block_y, 
     ui_block_to_screen_coords(block, block_x, block_y,
                                      &screen_x, &screen_y);
     draw_rounded_rectangle_filled_aa_wh(&gc.draw_buffer, screen_x, screen_y,
-                                 width, height, 25, color);
+                                        width, height, 20, color);
 }
 
 void ui_render_text_in_block(ui_block_t *block)
@@ -1025,17 +1204,16 @@ void ui_handle_mouse_move(ui_context_t *ctx, f32 delta_x, f32 delta_y)
             u64 hot_id = djb2_hash_append(hovered->id, "hot");
             // start hot animation
             if(!animation_get(hot_id, &hovered->hot_anim_t)){
-                printf("starting hot anim for %s\n", hovered->title);
                 animation_start(hot_id, 0.0f, 1.0f, ANIMATION_TIME, EASE_IN_OUT_CUBIC);
             }
         }
 
-        glfwSetCursor(gc.window, gc.hand_cursor);
+        set_cursor(gc.hand_cursor);
     }
     else
     {
         ix->hot_id = 0;
-        glfwSetCursor(gc.window, gc.regular_cursor);
+        set_cursor(gc.regular_cursor);
     }
 
     /* 
@@ -1144,25 +1322,17 @@ bool get_scroll_thumb_rect(ui_block_t *block, rect_t *out)
     if (content_height <= 0)
         return false;
 
-    f32 visible_ratio =
-        Clamp((f32)block->h / (f32)content_height, 0.1f, 1.0f);
+    f32 visible_ratio = Clamp((f32)block->h / (f32)content_height, 0.1f, 1.0f);
 
     i32 scroll_thumb_height = (i32)(block->h * visible_ratio);
-    scroll_thumb_height = MAX(scroll_thumb_height,
-                              scroll_thumb_width * 2);
+    scroll_thumb_height = MAX(scroll_thumb_height, scroll_thumb_width * 2);
 
     i32 scroll_bar_min_y = block->abs_y;
-    i32 scroll_bar_max_y =
-        scroll_bar_min_y + block->h - scroll_thumb_height;
+    i32 scroll_bar_max_y = scroll_bar_min_y + block->h - scroll_thumb_height;
 
-    f32 scroll_bar_ratio =
-        fabsf((f32)block->scroll_y /
-              (f32)block->max_scroll_y);
+    f32 scroll_bar_ratio = fabsf((f32)block->scroll_y / (f32)block->max_scroll_y);
 
-    i32 scroll_bar_y =
-        LERP_F32(scroll_bar_min_y,
-                 scroll_bar_max_y,
-                 scroll_bar_ratio);
+    i32 scroll_bar_y =LERP_F32(scroll_bar_min_y, scroll_bar_max_y, scroll_bar_ratio);
 
     *out = (rect_t){
         .x = scroll_bar_x,
@@ -1335,11 +1505,11 @@ void ui_handle_mouse_button(ui_context_t *ctx)
                 ix->released_id = active->id;
                 if (target->toggleable) {
                     target->toggled = !target->toggled;
-        u64 active_anim_id = djb2_hash_append(active->id, "toggle");
-        animation_start(active_anim_id, 
-                        active->toggled ? 0.0f : 1.0f,  // start from opposite
-                        active->toggled ? 1.0f : 0.0f,  // go to new state
-                        ANIMATION_TIME, EASE_IN_OUT_CUBIC);
+                    u64 active_anim_id = djb2_hash_append(active->id, "toggle");
+                    animation_start(active_anim_id, 
+                                    active->toggled ? 0.0f : 1.0f,  // start from opposite
+                                    active->toggled ? 1.0f : 0.0f,  // go to new state
+                                    ANIMATION_TIME, EASE_IN_OUT_CUBIC);
                 }
                 LOG_INFO("Block : %s released", target->title);
             }
@@ -1611,26 +1781,41 @@ void ui_block_layout(ui_context_t *ctx, ui_block_t *block)
     }
 }
 
-static inline bool ui_is_hot(ui_context_t *ctx, ui_block_t *block)      { return ctx->interaction.hot_id    == block->id; }
-static inline bool ui_is_active(ui_context_t *ctx, ui_block_t *block)   { return ctx->interaction.active_id == block->id; }
-static inline bool ui_is_released(ui_context_t *ctx, ui_block_t *block) { return ctx->interaction.released_id == block->id; }
+static inline bool ui_is_hot(ui_context_t *ctx, ui_block_t *block)      
+{ 
+    return ctx->interaction.hot_id    == block->id; 
+}
+
+static inline bool ui_is_active(ui_context_t *ctx, ui_block_t *block)   
+{ 
+    return ctx->interaction.active_id == block->id; 
+}
+
+static inline bool ui_is_released(ui_context_t *ctx, ui_block_t *block) 
+{ 
+    return ctx->interaction.released_id == block->id; 
+}
 
 static inline bool ui_is_clicked(ui_context_t *ctx, ui_block_t *block)  
 { 
     return ui_is_active(ctx, block) && ctx->interaction.mode == UI_INTERACT_CLICKED; 
 }
+
 static inline bool ui_is_dragging(ui_context_t *ctx, ui_block_t *block) 
 { 
     return ui_is_active(ctx, block) && ctx->interaction.mode == UI_INTERACT_DRAG_MOVE; 
 }
+
 static inline bool ui_is_drag_value(ui_context_t *ctx, ui_block_t *block) 
 { 
     return ui_is_active(ctx, block) && ctx->interaction.mode == UI_INTERACT_DRAG_VALUE; 
 }
+
 static inline bool ui_is_scrolling(ui_context_t *ctx, ui_block_t *block) 
 { 
     return ui_is_active(ctx, block) && ctx->interaction.mode == UI_INTERACT_SCROLL_THUMB; 
 }
+
 static inline bool ui_is_resizing(ui_context_t *ctx, ui_block_t *block) 
 { 
     return ui_is_active(ctx, block) && (
@@ -2400,6 +2585,7 @@ f32 ui_slider(ui_context_t *ctx, f32 min, f32 max, char *title)
     
     slider->min_value = min;
     slider->max_value = max;
+    // slider->value = (min+max)/2;
 
     slider->bg_color = HEX_TO_COLOR4(0xbd93f9);
     slider->hover_color = lite(HEX_TO_COLOR4(0xbd93f9));
@@ -2531,7 +2717,8 @@ f32 ui_knob(ui_context_t *ctx, char *title, f32 min, f32 max)
 }
 
 /* -------------- Tree Widget stuff -------------- */
-typedef struct{
+typedef struct
+{
     bool collapsed;
     int depth;
 }tree_node_state_t;
@@ -2667,6 +2854,216 @@ void ui_render_modal(ui_context_t *ctx)
         
         ui_render_block(ctx->modal_block);
     }
+}
+
+/* -------------- Reorderable List Widget stuff -------------- */
+typedef struct
+{
+    /* persists between frames */
+    bool has_drag;    
+    i32  drag_id;     
+    f32  grab_offset; 
+    f32  drag_y;      
+
+    char       *title;
+    i32         y, width, item_h, advance, count;
+    i32         slot;        
+    i32         drag_slot;   
+    i32        *ids;         
+    ui_block_t *dragged_row;
+} reorder_list_state_t;
+
+typedef struct { char *key; reorder_list_state_t value; } reorder_list_map_t;
+static reorder_list_map_t   *g_reorder_list_map = NULL;
+static reorder_list_state_t *g_reorder_cur      = NULL;
+
+void ui_render_reorder_item(ui_block_t *block)
+{
+    color4_t base  = HEX_TO_COLOR4(0x3a3d4e);
+    color4_t color = color4_lerp(base, HEX_TO_COLOR4(0x44475a), block->hot_anim_t);
+    color = color4_lerp(color, HEX_TO_COLOR4(0x525673), block->active_anim_t);
+
+    ui_draw_rounded_rect_in_block(block, 0, 0, block->w, block->h, color);
+
+    i32 grip_x = 14;
+    i32 grip_y = block->h / 2;
+    color4_t grip_color = HEX_TO_COLOR4(0x8890a8);
+    for(i32 row = -1; row <= 1; row++)
+    {
+        ui_draw_rect_in_block(block, grip_x,     grip_y + row * 6 - 2, 4, 4, grip_color);
+        ui_draw_rect_in_block(block, grip_x + 8, grip_y + row * 6 - 2, 4, 4, grip_color);
+    }
+
+    if(block->text.string)
+    {
+        block->text.pos.x = grip_x + 24;
+        block->text.pos.y = (block->h - get_line_height(block->text.font)) / 2;
+        ui_render_text_in_block(block);
+    }
+}
+
+void ui_update_reorder_item(ui_block_t *block)
+{
+    u64 hot_id    = djb2_hash_append(block->id, "hot");
+    u64 active_id = djb2_hash_append(block->id, "active");
+
+    if(!animation_get(hot_id, &block->hot_anim_t))
+        block->hot_anim_t = ui_is_hot(gc.ui_ctx, block) ? 1.0f : 0.0f;
+
+    if(!animation_get(active_id, &block->active_anim_t))
+        block->active_anim_t = ui_is_active(gc.ui_ctx, block) ? 1.0f : 0.0f;
+}
+static u64 reorder_anim_id(reorder_list_state_t *s, i32 id)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s_%d_posY", s->title, id);
+    return (u64)djb2_hash(buf);
+}
+
+void ui_reorder_begin(ui_context_t *ctx, char *title, i32 x, i32 y, i32 width,
+                      i32 item_height, i32 item_spacing, i32 count)
+{
+    g_reorder_cur = NULL;
+
+    reorder_list_map_t *entry = shgetp_null(g_reorder_list_map, title);
+    if(!entry)
+    {
+        reorder_list_state_t blank = {0};
+        shput(g_reorder_list_map, title, blank);
+        entry = shgetp_null(g_reorder_list_map, title);
+    }
+    reorder_list_state_t *s = &entry->value;
+
+    s->title       = title;
+    s->y           = y;
+    s->width       = width;
+    s->item_h      = item_height;
+    s->advance     = item_height + item_spacing;
+    s->count       = count;
+    s->slot        = 0;
+    s->drag_slot   = -1;
+    s->dragged_row = NULL;
+    s->ids         = (count > 0) ? ARENA_ALLOC(gc.frame_arena, count * sizeof(i32)) : NULL;
+
+    i32 panel_h = (count > 0) ? (count * s->advance - item_spacing) : item_height;
+    ui_block_t *panel = CHECK_PTR(ui_new_block(ctx, title, x - 10, y, width + 20, panel_h, NO_LAYOUT));
+    if(!panel) return;
+
+    panel->is_leaf      = false;
+    panel->bg_color     = COLOR_TRANSPARENT;
+    panel->border_width = 0;
+
+    if(ctx->current_block) ui_add_child(ctx, panel);
+    ctx->current_block = panel;
+
+    g_reorder_cur = s;
+}
+
+void ui_reorder_item(ui_context_t *ctx, i32 id, char *label)
+{
+    reorder_list_state_t *s = g_reorder_cur;
+    if(!s || s->slot >= s->count) return;
+
+    i32 slot = s->slot++;
+    s->ids[slot] = id;
+
+    char *row_title = ARENA_ALLOC(gc.frame_arena, 64);
+    snprintf(row_title, 64, "%s_%d", s->title, id);
+
+    ui_block_t *row = CHECK_PTR(ui_new_block(ctx, row_title, 0, 0, s->width, s->item_h, NO_LAYOUT));
+    if(!row) return;
+
+    row->is_leaf       = true;
+    row->clickable     = true;
+    row->custom_render = ui_render_reorder_item;
+    row->custom_update = ui_update_reorder_item;
+    row->text.font     = gc.font;
+    row->text.string   = label;
+    row->text.color    = HEX_TO_COLOR4(0xf8f8f2);
+
+    /* where the row sits: its slot, unless a slide animation is running */
+    u64 pos_id = reorder_anim_id(s, id);
+    f32 y      = (f32)(slot * s->advance);
+    animation_get(pos_id, &y);
+
+    if(ui_is_active(ctx, row))
+    {
+        if(!s->has_drag || s->drag_id != id)
+            s->grab_offset = (f32)gc.mouse_y - ((f32)s->y + y);
+
+        s->has_drag  = true;
+        s->drag_id   = id;
+        s->drag_slot = slot;
+        s->drag_y    = (f32)gc.mouse_y - s->grab_offset - (f32)s->y;
+
+        row->y = (i32)s->drag_y;
+        s->dragged_row = row;          /* added last so it paints on top */
+        return;
+    }
+
+    if(s->has_drag && s->drag_id == id)  /* just let go: settle into the slot */
+    {
+        animation_start(pos_id, s->drag_y, (f32)(slot * s->advance), ANIMATION_TIME, EASE_IN_OUT_CUBIC);
+        animation_get(pos_id, &y);
+        s->has_drag = false;
+    }
+
+    row->y = (i32)y;
+    ui_add_child(ctx, row);
+}
+
+/* returns true when the user dragged a row to a new slot; apply the move to your array */
+bool ui_reorder_end(ui_context_t *ctx, i32 *from, i32 *to)
+{
+    reorder_list_state_t *s = g_reorder_cur;
+    g_reorder_cur = NULL;
+    if(!s) return false;
+
+    if(s->dragged_row) ui_add_child(ctx, s->dragged_row);
+    ui_end_panel(ctx);
+
+    if(s->drag_slot < 0 || s->slot == 0) return false;
+
+    i32 new_slot = (i32)roundf(s->drag_y / (f32)s->advance);
+    new_slot = Clamp(0, new_slot, s->slot - 1);
+    if(new_slot == s->drag_slot) return false;
+
+    /* the rows the dragged one jumps over slide by one slot */
+    i32 lo  = (s->drag_slot < new_slot) ? s->drag_slot + 1 : new_slot;
+    i32 hi  = (s->drag_slot < new_slot) ? new_slot         : s->drag_slot - 1;
+    i32 dir = (s->drag_slot < new_slot) ? -1 : 1;
+
+    for(i32 k = lo; k <= hi; k++)
+    {
+        u64 aid = reorder_anim_id(s, s->ids[k]);
+        f32 cur = (f32)(k * s->advance);
+        animation_get(aid, &cur);
+        animation_start(aid, cur, (f32)((k + dir) * s->advance), ANIMATION_TIME, EASE_IN_OUT_CUBIC);
+    }
+
+    *from = s->drag_slot;
+    *to   = new_slot;
+    return true;
+}
+
+/* small helper so users don't have to write the memmove dance */
+void array_move(void *base, size_t elem_size, i32 from, i32 to)
+{
+    if(from == to){
+        return;
+    }
+    u8 *a = (u8 *)base;
+    u8 tmp[128];
+    assert(elem_size <= sizeof(tmp));
+
+    memcpy(tmp, a + from * elem_size, elem_size);
+
+    if(from < to){
+        memmove(a + from * elem_size, a + (from + 1) * elem_size, (to - from) * elem_size);
+    }else{
+        memmove(a + (to + 1) * elem_size, a + to * elem_size, (from - to) * elem_size);
+    }
+    memcpy(a + to * elem_size, tmp, elem_size);
 }
 
 /* -------------- Radial menu stuff -------------- */
@@ -3516,151 +3913,6 @@ void ui_end_frame(ui_context_t *ctx)
     ui_handle_mouse_move(ctx,0,0);
 }
 
-/* For when I feel like experimenting with multithreading */
-thread_func_ret_t render_tile(thread_func_param_t data) 
-{
-    tile_data_t *tile = (tile_data_t *)data;
-
-    fast_srand(tile->start_x * 1000 + tile->start_y + 1);
-
-    for (u32 y = tile->start_y; y < tile->end_y; ++y) 
-    {
-        for (u32 x = tile->start_x; x < tile->end_x; ++x) 
-        {
-        }
-    }
-
-    #ifdef _WIN32
-        return 0;
-    #else
-        return NULL;
-    #endif
-}
-
-void render_all_parallel(void)
-{
-    gc.draw_buffer.height = gc.screen_height;
-    gc.draw_buffer.width  = gc.screen_width;
-
-    u32 height  = gc.draw_buffer.height;
-    u32 width   = gc.draw_buffer.width;
-
-    gc.draw_buffer.pixels = ARENA_ALLOC(gc.frame_arena, height * width * sizeof(color4_t));
-
-    clear_screen(&gc.draw_buffer, HEX_TO_COLOR4(0xFFFFFF));
-
-    i32 num_threads = get_core_count();
-    const u32 tile_size = 64;
-
-    u32 tiles_x = CEIL_DIV(width, tile_size);
-    u32 tiles_y = CEIL_DIV(height, tile_size);
-    u32 total_tiles = tiles_x * tiles_y;
-
-    tile_data_t* tiles = ARENA_ALLOC(gc.frame_arena, total_tiles * sizeof(tile_data_t));
-    thread_handle_t* threads = ARENA_ALLOC(gc.frame_arena, num_threads * sizeof(thread_handle_t));
-
-    i32 tile_idx = 0;
-    
-    for (u32 ty = 0; ty < tiles_y; ty++) 
-    {
-        u32 start_y = ty * tile_size;
-        u32 end_y = (start_y + tile_size > height) ? height : start_y + tile_size;
-        
-        for (u32 tx = 0; tx < tiles_x; tx++) 
-        {
-            u32 start_x = tx * tile_size;
-            u32 end_x = (start_x + tile_size > width) ? width : start_x + tile_size;
-            
-            tiles[tile_idx] = (tile_data_t){
-                .start_x = start_x, .end_x = end_x,
-                .start_y = start_y, .end_y = end_y,
-                .width = width, .height = height
-            };
-            
-            int thread_slot = tile_idx % num_threads;
-            
-            if (tile_idx >= num_threads) {
-                PROFILE("Waiting for a slot"){
-                    join_thread(threads[thread_slot]);
-                }
-            }
-            
-            PROFILE("Actually creating a thread, does it matter ?")
-            {
-                threads[thread_slot] = create_thread(render_tile, &tiles[tile_idx]);
-            }
-            
-            tile_idx++;
-        }
-    }
-
-    int remaining_threads = (total_tiles < num_threads) ? total_tiles : num_threads;
-
-    PROFILE("Waiting to join")
-    {
-        for (int i = 0; i < remaining_threads; i++) {
-            join_thread(threads[i]);
-        }
-    }
-
-    u32 pos = gc.screen_width-20*10;
-
-    rendered_text_tt text = {
-        .font = gc.font,
-        .pos = {.x=pos, .y=0},
-        .color = {.r = 255, .g = 255, .b = 255, .a=255},
-        .string = frametime
-    };
-    
-    snprintf(frametime, BUFFER_SIZE, "%.2f ms, %d cores", gc.average_frame_time*1000,num_threads);
-    render_text_tt(&gc.draw_buffer, &text);
-
-    if(gc.profile)
-    {
-        render_prof_entries();
-    }
-
-    prof_buf_count = 0;
-    
-    if(gc.capture)
-    {
-        export_image(&gc.draw_buffer, "capture.tga");
-        gc.capture = false;
-    }
-}
-
-void blit_to_screen(void *pixels, u32 width, u32 height)
-{
-    glBindTexture(GL_TEXTURE_2D, gc.texture);
-
-    // update it with the new frame
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 
-                    (int)width, (int)height,
-                    GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, gc.read_fbo); // source
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);           // destination, make the default framebuffer active again ?
-    
-    // transfer pixel values from one region of a read framebuffer to another region of a draw framebuffer.
-    glBlitFramebuffer(0, 0, width, height,  // src
-                      0, height, width, 0,  // dst (flipped)    
-                      GL_COLOR_BUFFER_BIT,    
-                      GL_NEAREST);      
-}
-
-void present_frame(image_view_t* view) 
-{
-    PROFILE("blit_to_screen")
-    {
-        blit_to_screen(view->pixels, view->width, view->height);
-    }
-
-    PROFILE("swapping buffers")
-    {
-        glfwSwapBuffers((GLFWwindow*)gc.window);
-    }
-}
-
 void render_frame_history_graph(void)
 {
     const i32 graph_height = 60;  
@@ -3733,20 +3985,24 @@ void render_mouse_stuff(void)
     // draw_rounded_rectangle_filled_aa(&gc.draw_buffer, gc.mouse_x - 100, gc.mouse_y - 50, gc.mouse_x + 100, gc.mouse_y + 50, 20.0f, COLOR_CYAN);
 }
 
-void menu_callback_new(void *data) {
-    printf("New selected!\n");
+void menu_callback_new(void *data) 
+{
+    LOG_DEBUG("New selected!");
 }
 
-void menu_callback_open(void *data) {
-    printf("Open selected!\n");
+void menu_callback_open(void *data) 
+{
+    LOG_DEBUG("Open selected!");
 }
 
-void menu_callback_save(void *data) {
-    printf("Save selected!\n");
+void menu_callback_save(void *data) 
+{
+    LOG_DEBUG("Save selected!");
 }
 
-void menu_callback_exit(void *data) {
-    printf("Exit selected!\n");
+void menu_callback_exit(void *data) 
+{
+    LOG_DEBUG("Exit selected!");
     gc.running = false;
 }
 
@@ -3796,6 +4052,12 @@ void render_todo_screen(void)
     reset_input_for_frame();
 }
 
+typedef struct
+{
+    i32   id; 
+    char *label;
+} reorder_item;
+
 void render_layout_test_screen(void)
 {
     text_edit_state_t *text_state = NULL;
@@ -3811,7 +4073,7 @@ void render_layout_test_screen(void)
                 ui_end_panel(gc.ui_ctx);
                 if(ui_button(gc.ui_ctx,"Buttton1"))
                 {
-                    printf("Release is working\n");
+                    LOG_DEBUG("Release is working");
                 }
                 ui_button(gc.ui_ctx,"Buttton23");
             ui_end_panel(gc.ui_ctx);
@@ -3862,7 +4124,28 @@ void render_layout_test_screen(void)
                               0, 0, val, HEX_TO_COLOR4(0x3d005c),true);
             ui_end_panel(gc.ui_ctx);
 
-            ui_begin_panel(gc.ui_ctx, "Test4", 0, 0, 0, 300, NO_LAYOUT);
+            static reorder_item list_items[] = {
+                { .id = 0, .label = "Buy groceries" },
+                { .id = 1, .label = "Write UI code" },
+                { .id = 2, .label = "Fix scrollbar interaction" },
+                { .id = 3, .label = "Cache frames between renders" },
+                { .id = 4, .label = "Integrate OpenGL renderer" },
+                { .id = 5, .label = "Sleep at some point" },
+            };
+            #define ITEMS_COUNT (sizeof(list_items) / sizeof(list_items[0]))
+
+            ui_begin_panel(gc.ui_ctx, "reorder_root", 0, 0, 0, 600, VERTICAL_LAYOUT);
+                ui_reorder_begin(gc.ui_ctx, "dummy_reorder", 40, 40, 600, 44, 8, ITEMS_COUNT);
+                for(i32 i = 0; i < (i32)ITEMS_COUNT; i++)
+                    ui_reorder_item(gc.ui_ctx, list_items[i].id, list_items[i].label);
+
+                i32 from, to;
+                if(ui_reorder_end(gc.ui_ctx, &from, &to))
+                    array_move(list_items, sizeof(list_items[0]), from, to);
+
+            ui_end_panel(gc.ui_ctx);
+
+            ui_begin_panel(gc.ui_ctx, "RadialTest4", 0, 0, 0, 300, NO_LAYOUT);
                 radial_menu_map_t *menu_state = ui_radial_menu(gc.ui_ctx, "testradial", 150,150 , 150);
                     static int once = 0;
                     if (menu_state && !once) {
@@ -3905,12 +4188,16 @@ void render_debug_screen(void)
             .color = COLOR_WHITE,
             .string = frametime
         };
-        snprintf(frametime, BUFFER_SIZE, "%.2f ms", gc.average_frame_time*1000);
+        snprintf(frametime, SCRATCH_BUF_SIZE, "%.2f ms", gc.average_frame_time*1000);
         render_text_tt(&gc.draw_buffer, &frame_time);
     
         if(gc.profile)
         {
             render_prof_entries();
+        }
+        else if(gc.arena_dbg)
+        {
+            render_arena_dbg_panel(gc.frame_arena,0,0);
         }
     }
 
@@ -4010,9 +4297,31 @@ void render_interactive_texture(void)
     }
 
     render_texture_to_buffer(&gc.draw_buffer, gc.my_texture, new_pos.x, new_pos.y, 5.0f, &new_pos);
+    draw_rounded_rectangle_filled_aa(&gc.draw_buffer,gc.mouse_x,gc.mouse_y,gc.mouse_x+600, gc.mouse_y+50,20,(color4_t){120,55,60,120});
 }
 
-void render_all(void)
+/* For when I feel like experimenting with multithreading */
+thread_func_ret_t render_tile(thread_func_param_t data) 
+{
+    tile_data_t *tile = (tile_data_t *)data;
+
+    fast_srand(tile->start_x * 1000 + tile->start_y + 1);
+
+    for (u32 y = tile->start_y; y < tile->end_y; ++y) 
+    {
+        for (u32 x = tile->start_x; x < tile->end_x; ++x) 
+        {
+        }
+    }
+
+    #ifdef _WIN32
+        return 0;
+    #else
+        return NULL;
+    #endif
+}
+
+void render_all_parallel(void)
 {
     gc.draw_buffer.height = gc.screen_height;
     gc.draw_buffer.width  = gc.screen_width;
@@ -4021,19 +4330,259 @@ void render_all(void)
     u32 width   = gc.draw_buffer.width;
 
     gc.draw_buffer.pixels = ARENA_ALLOC(gc.frame_arena, height * width * sizeof(color4_t));
+
+    clear_screen(&gc.draw_buffer, HEX_TO_COLOR4(0xFFFFFF));
+
+    i32 num_threads = get_core_count();
+    const u32 tile_size = 64;
+
+    u32 tiles_x = CEIL_DIV(width, tile_size);
+    u32 tiles_y = CEIL_DIV(height, tile_size);
+    u32 total_tiles = tiles_x * tiles_y;
+
+    tile_data_t* tiles = ARENA_ALLOC(gc.frame_arena, total_tiles * sizeof(tile_data_t));
+    thread_handle_t* threads = ARENA_ALLOC(gc.frame_arena, num_threads * sizeof(thread_handle_t));
+
+    i32 tile_idx = 0;
+    
+    for (u32 ty = 0; ty < tiles_y; ty++) 
+    {
+        u32 start_y = ty * tile_size;
+        u32 end_y = MIN(start_y + tile_size , height);
+        
+        for (u32 tx = 0; tx < tiles_x; tx++) 
+        {
+            u32 start_x = tx * tile_size;
+            u32 end_x = MIN(start_x + tile_size , width);
+            
+            tiles[tile_idx] = (tile_data_t){
+                .start_x = start_x, .end_x = end_x,
+                .start_y = start_y, .end_y = end_y,
+                .width = width, .height = height
+            };
+            
+            int thread_slot = tile_idx % num_threads;
+            
+            if (tile_idx >= num_threads) {
+                PROFILE("Waiting for a slot"){
+                    join_thread(threads[thread_slot]);
+                }
+            }
+            
+            PROFILE("Actually creating a thread, does it matter ?")
+            {
+                threads[thread_slot] = create_thread(render_tile, &tiles[tile_idx]);
+            }
+            
+            tile_idx++;
+        }
+    }
+
+    int remaining_threads = (total_tiles < num_threads) ? total_tiles : num_threads;
+
+    PROFILE("Waiting to join")
+    {
+        for (int i = 0; i < remaining_threads; i++) {
+            join_thread(threads[i]);
+        }
+    }
+
+    u32 pos = gc.screen_width-20*10;
+
+    rendered_text_tt text = {
+        .font = gc.font,
+        .pos = {.x=pos, .y=0},
+        .color = {.r = 255, .g = 255, .b = 255, .a=255},
+        .string = frametime
+    };
+    
+    snprintf(frametime, SCRATCH_BUF_SIZE, "%.2f ms, %d cores", gc.average_frame_time*1000,num_threads);
+    render_text_tt(&gc.draw_buffer, &text);
+
+    if(gc.profile)
+    {
+        render_prof_entries();
+    }
+
+
+
+    prof_buf_count = 0;
+    
+    if(gc.capture)
+    {
+        export_image(&gc.draw_buffer, "capture.tga");
+        gc.capture = false;
+    }
+}
+
+static GLuint compile_shader(GLenum type, const char *path)
+{
+    char *src = read_file(path);
+
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, NULL);
+    glCompileShader(s);
+
+    GLint ok;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetShaderInfoLog(s, sizeof(log), NULL, log);
+        LOG_ERR("Shader compile error: %s", log);
+        exit(1);
+    }
+    free(src);
+    return s;
+}
+
+static GLuint create_program(const char *vs_path, const char *fs_path)
+{
+    GLuint vs = compile_shader(GL_VERTEX_SHADER,   vs_path);
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_path);
+
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+
+    GLint linked;
+    glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[1024];
+        glGetProgramInfoLog(prog, sizeof(log), NULL, log);
+        LOG_ERR("Program link error: %s", log);
+        exit(1);
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    return prog;
+}
+
+typedef struct {
+    GLuint program;
+    GLint  u_ichannel0;
+    GLint  u_tex_scale;
+    GLint  u_input_size; 
+} shader_prog_t;
+ 
+static shader_prog_t crt_prog;
+static shader_prog_t default_prog;
+static GLuint        present_vao;
+
+static void load_shader_prog(shader_prog_t *out, const char *vert_path, const char *frag_path)
+{
+    out->program      = create_program(vert_path, frag_path);
+    out->u_ichannel0  = glGetUniformLocation(out->program, "iChannel0");
+    out->u_tex_scale  = glGetUniformLocation(out->program, "texScale");
+    out->u_input_size = glGetUniformLocation(out->program, "inputSize");
+}
+
+void init_framebuffer_post_fx(i32 max_width, i32 max_height)
+{
+    glGenTextures(1, &gc.texture);
+    glBindTexture(GL_TEXTURE_2D, gc.texture);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                 max_width, max_height,
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    load_shader_prog(&default_prog,"..\\shaders\\vs.vert","..\\shaders\\fs.frag");
+    load_shader_prog(&crt_prog,"..\\shaders\\vs.vert","..\\shaders\\crt_fs.frag");
+
+    glGenVertexArrays(1, &present_vao);
+}
+
+void blit_to_screen_post_fx(void *pixels, u32 width, u32 height, i32 screen_width, i32 screen_height)
+{
+    glBindTexture(GL_TEXTURE_2D, gc.texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                    (int)width, (int)height,
+                    GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, screen_width, screen_height);
+
+    shader_prog_t *p = gc.post_fx?&crt_prog:&default_prog;
+
+    glUseProgram(p->program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gc.texture);
+    glUniform1i(p->u_ichannel0, 0);
+    
+    float scaleX = (float)width  / (float)gc.max_width;
+    float scaleY = (float)height / (float)gc.max_height;
+    glUniform2f(p->u_tex_scale, scaleX, scaleY);
+ 
+    if (p->u_input_size >= 0) {
+        glUniform2f(p->u_input_size, (float)width, (float)height);
+    }
+ 
+    glBindVertexArray(present_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
+void blit_to_screen(void *pixels, u32 width, u32 height)
+{
+    glBindTexture(GL_TEXTURE_2D, gc.texture);
+    // update it with the new frame"
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 
+                    (int)width, (int)height,
+                    GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gc.read_fbo); // source
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);           // destination, make the default framebuffer active again ?
+    
+    // transfer pixel values from one region of a read framebuffer to another region of a draw framebuffer.
+    glBlitFramebuffer(0, 0, width, height,  // src
+                      0, height, width, 0,  // dst (flipped)    
+                      GL_COLOR_BUFFER_BIT,    
+                      GL_NEAREST);      
+}
+
+void present_frame(image_view_t* view) 
+{
+    PROFILE("blit_to_screen")
+    {
+        // blit_to_screen(view->pixels, view->width, view->height);
+        blit_to_screen_post_fx(view->pixels, view->width, view->height, 
+                              gc.window_width, gc.window_height);
+    }
+
+    PROFILE("swapping buffers")
+    {
+        glfwSwapBuffers((GLFWwindow*)gc.window);
+    }
+}
+
+void render_all(void)
+{
+    gc.frame_buffer.width  = gc.window_width;
+    gc.frame_buffer.height = gc.window_height;
+    gc.frame_buffer.pixels = ARENA_ALLOC(gc.frame_arena, gc.window_width * gc.window_height * sizeof(color4_t));
+
+    gc.draw_buffer.width  = gc.screen_width;
+    gc.draw_buffer.height = gc.screen_height;
+    gc.draw_buffer.pixels = gc.frame_buffer.pixels + gc.titlebar_height * gc.window_width;
     
     PROFILE("Clearing the screen")
     {
-        clear_screen(&gc.draw_buffer, HEX_TO_COLOR4(0x282a36));
+        clear_screen(&gc.frame_buffer, HEX_TO_COLOR4(0x282a36));
         // clear_screen_radial_gradient(&gc.draw_buffer, HEX_TO_COLOR4(0x6272a4),HEX_TO_COLOR4(0x282a36));
     }
-    
     ui_new_frame(gc.ui_ctx);
 
     static u32 side_panel_x = 0;
     side_panel_x= gc.side_panel_x * gc.screen_width;
-    if(manipulator_axis_x(&side_panel_x, 20))
+    if(manipulator_axis_x(&side_panel_x, 20)){
         gc.side_panel_x = (f32)side_panel_x / (f32)gc.screen_width;
+    }
 
     PROFILE("Main screen")
     {
@@ -4043,8 +4592,8 @@ void render_all(void)
         // render_todo_screen();
     }
 
-    reset_input_for_frame(); 
- 
+    reset_input_for_frame();
+
     if(gc.debug)
     {
         PROFILE("Debug Screen")
@@ -4053,10 +4602,11 @@ void render_all(void)
         }
     }
 
+    titlebar_draw(&gc.frame_buffer, &gc.titlebar);
+
     prof_buf_count = 0;
     
-    if(gc.capture)
-    {
+    if(gc.capture){
         export_image(&gc.draw_buffer, "capture.tga");
         gc.capture = false;
     }
@@ -4123,17 +4673,18 @@ void init_framebuffer(i32 max_width, i32 max_height)
 
     if(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) 
     {
-        fprintf(stderr, "Framebuffer not complete!\n");
+        LOG_ERR("Framebuffer not complete!");
         exit(1);
     }
 }
 
-void *create_window(u32 width, u32 height, char *title)
+void *
+create_window(u32 width, u32 height, char *title)
 {
     /* https://github.com/glfw/glfw/pull/1426/  */
     glfwInitHint(GLFW_WIN32_MESSAGES_IN_FIBER, GLFW_TRUE);
     if (!glfwInit()) {
-        fprintf(stderr, "Error : Failed to initialize GLFW\n");
+        LOG_ERR("Failed to initialize GLFW");
         return NULL;
     }
 
@@ -4141,15 +4692,24 @@ void *create_window(u32 width, u32 height, char *title)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_RESIZABLE, GL_TRUE);
-    // glfwWindowHint(GLFW_SAMPLES, 4); // Enable multisampling for smoother edges
+    glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);  
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE); 
+    glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
+    glfwWindowHint(GLFW_SAMPLES, 4);
     
     GLFWwindow *window = CHECK_PTR(glfwCreateWindow((int)width, (int)height, title, NULL, NULL));
-    
+    gc.bw = CHECK_PTR(borderless_attach(glfwGetWin32Window(window)));
+
+	titlebar_init(&gc.titlebar, gc.bw, buttons, sizeof buttons / sizeof buttons[0], &style);
+
     glfwMakeContextCurrent(window);
 
     // vsync on
     glfwSwapInterval(1);
     
+    glEnable(GL_MULTISAMPLE);
+    glfwShowWindow(window);
+
     glViewport(0, 0, (int)width, (int)height);
     
     glfwSetKeyCallback(window, key_callback);
@@ -4162,15 +4722,21 @@ void *create_window(u32 width, u32 height, char *title)
     glfwSetMouseButtonCallback(window, mouse_button_callback);
     glfwSetDropCallback(window, drop_callback);
 
+    int fb_width, fb_height;
+    glfwGetFramebufferSize(window, &fb_width, &fb_height);
+    framebuffer_size_callback(window, fb_width, fb_height);
+
     glewExperimental = GL_TRUE;
     GLenum err = glewInit();
     if (err != GLEW_OK) {
-        fprintf(stderr, "Error : GLEW initialization failed: %s\n", glewGetErrorString(err));
+        LOG_ERR("GLEW initialization failed: %s", glewGetErrorString(err));
         return NULL;
     }
 
-    printf("OpenGL Version: %s\n", glGetString(GL_VERSION));
-    printf("GLSL Version: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+    LOG_DEBUG("OpenGL Version: %s", glGetString(GL_VERSION));
+    LOG_DEBUG("GLSL Version: %s", glGetString(GL_SHADING_LANGUAGE_VERSION));
+    LOG_DEBUG("Vendor:   %s\n",        glGetString(GL_VENDOR));
+    LOG_DEBUG("Renderer: %s\n",        glGetString(GL_RENDERER));
 
     return window;
 }
@@ -4188,20 +4754,21 @@ void init_time(void)
 
 bool init_all(u32 w, u32 h, char *title, char *icon)
 {
+    // Allocate alot so we dont have to reallocate again
+    gc.frame_arena = arena_reserve(MB(10));
+    gc.persistent_arena = arena_reserve(MB(1));
+
+    // Just do the maximum possible size 
+    gc.max_width  = 1920;
+    gc.max_height = 1080;
+
     gc.screen_width  = w;
     gc.screen_height = h;
 
     gc.window = CHECK_PTR(create_window(gc.screen_width, gc.screen_height, title));
 
-    if(!gc.window){
-        return false;
-    }
-
-    // Allocate alot so we dont have to reallocate again
-    gc.frame_arena = arena_reserve(MB(10));
-
-    // Just do the maximum possible size 
-    init_framebuffer(1920, 1080);
+    // init_framebuffer(gc.max_width, gc.max_height);
+    init_framebuffer_post_fx(gc.max_width, gc.max_height);
 
     prof_init();
 
@@ -4211,6 +4778,9 @@ bool init_all(u32 w, u32 h, char *title, char *icon)
     if(!(gc.font && gc.icon_font)){
         return false;
     }
+
+    // Smaller copy of the UI font for the title bar labels, sized for the window's DPI
+    gc.titlebar.style.font = load_font_from_file("..\\Font\\Lato.ttf", (f32)borderless_scale(gc.bw, 14));
     
     gc.ui_ctx = CHECK_PTR(ui_new_ctx());
 
@@ -4225,13 +4795,14 @@ bool init_all(u32 w, u32 h, char *title, char *icon)
     gc.dock        = false;
     gc.profile     = false;
     gc.changed     = true;
+    gc.post_fx     = false;
     
     init_time();
     
     gc.hand_cursor    = CHECK_PTR(glfwCreateStandardCursor(GLFW_HAND_CURSOR));
     gc.regular_cursor = CHECK_PTR(glfwCreateStandardCursor(GLFW_ARROW_CURSOR));
     
-    set_dark_mode(gc.window);
+    // set_dark_mode(gc.window);
     set_window_icon(icon);
     gc.my_texture = load_texture(icon);
 
@@ -4249,22 +4820,12 @@ int main(void)
 {   
     if(!init_all(1100, 800, "UI", "..\\Resources\\icon.png"))
     {
-        fprintf(stderr, "Error : Failed to initialize application.");
+        LOG_ERR("Failed to initialize application.");
         exit(EXIT_FAILURE);
     }
 
-    static double prev_time = 0.0;
-
     while(!glfwWindowShouldClose((GLFWwindow*)gc.window))
     {
-        double now = glfwGetTime();
-        double dt = 0;
-        if (prev_time != 0.0)
-        {
-            dt = now - prev_time;
-        }
-        prev_time = now;
-
         PROFILE("Total Actual Time")
         {
             PROFILE("Updating All")
@@ -4281,14 +4842,19 @@ int main(void)
             {
                 poll_events();
             }
+
+            PROFILE("Sleep 0.5 ms")
+            {
+                precise_sleep(0.0005);
+            }
         }
-
-        cleanup_all();
-
+        
         PROFILE("Presenting The frame")
         {
-            present_frame(&gc.draw_buffer);
+            present_frame(&gc.frame_buffer);
         }
+        
+        cleanup_all();
     }
     return 0;
 }

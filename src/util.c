@@ -5,7 +5,6 @@ void print_spaces(const char* message, int spaces)
 {
     printf("%-*s ",spaces,message);
 }
-
 void log_color(char *text, char c)
 {
     switch (c)
@@ -45,15 +44,12 @@ void log_color(char *text, char c)
     printf("\033[0m");
 }
 
-#include <stdio.h>
-#include <stdarg.h>
-
 typedef enum
 {
     LOG_DEBUG,
     LOG_INFO,
     LOG_WARN,
-    LOG_ERROR
+    LOG_ERR
 } LogLevel;
 
 #ifdef LOG
@@ -71,15 +67,15 @@ static inline void log_message(LogLevel level, const char *fmt, ...)
 
         case LOG_INFO:
             color = "\033[0;32m";  // green
-            prefix = "[INFO ]";
+            prefix = "[INFO]";
             break;
 
         case LOG_WARN:
             color = "\033[1;33m";  // yellow
-            prefix = "[WARN ]";
+            prefix = "[WARN]";
             break;
 
-        case LOG_ERROR:
+        case LOG_ERR:
             color = "\033[1;31m";  // red
             prefix = "[ERROR]";
             break;
@@ -103,14 +99,14 @@ static inline void log_message(LogLevel level, const char *fmt, ...)
 #define LOG_DEBUG(...) log_message(LOG_DEBUG, __VA_ARGS__)
 #define LOG_INFO(...)  log_message(LOG_INFO,  __VA_ARGS__)
 #define LOG_WARN(...)  log_message(LOG_WARN,  __VA_ARGS__)
-#define LOG_ERROR(...) log_message(LOG_ERROR, __VA_ARGS__)
+#define LOG_ERR(...) log_message(LOG_ERR, __VA_ARGS__)
 
 #else
 
 #define LOG_DEBUG(...) ((void)0)
 #define LOG_INFO(...)  ((void)0)
 #define LOG_WARN(...)  ((void)0)
-#define LOG_ERROR(...) ((void)0)
+#define LOG_ERR(...) ((void)0)
 
 #endif
 
@@ -304,6 +300,35 @@ static inline f32 smoothstep(f32 edge0, f32 edge1, f32 x)
     f32 t = Clamp(0.0f, NORMALIZE(x, edge0, edge1), 1.0f);
     return t * t * (3.0f - 2.0f * t);
 }
+
+f64 sigmoid(f64 x) 
+{
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void softmax(const double *input, double *output, int size) 
+{
+    // softmax is invariant to subtraction of a constant
+    double max = input[0];
+    for (int i = 1; i < size; i++) {
+        if (input[i] > max) {
+            max = input[i];
+        }
+    }
+
+    // subtracting x_max from all x_i ensures it doesnt overflow
+
+    double sum = 0.0;
+    for (int i = 0; i < size; i++) {
+        output[i] = exp(input[i] - max); // Subtract max to prevent overflow
+        sum += output[i];
+    }
+
+    for (int i = 0; i < size; i++) {
+        output[i] /= sum;
+    }
+}
+double relu(double x) { return x > 0 ? x : 0; }
 
 /*
     TODO: Check if its really faster
@@ -1422,29 +1447,41 @@ void quat_slerp(quat_t *quat1, quat_t *quat2, float slerp, quat_t *result)
 animation_t animation_items[ANIMATION_MAX_ITEMS];
 i32 animation_item_count;
 
-anim_chain_t anim_chains[32];
+anim_chain_t anim_chains[ANIM_CHAIN_MAX];
 i32 anim_chain_count;
 
+static anim_pingpong_state_t pingpong_states[ANIM_PINGPONG_MAX];
+static i32                   pingpong_state_count;
 /* https://easings.net/ */
 f64 apply_easing(f64 t, easing_type easing) 
 {
     switch (easing) 
     {
         case EASE_LINEAR:
+        {
             return t;
+        }
             
         case EASE_IN_QUAD:
+        {
             return t * t;
+        }
             
         case EASE_OUT_QUAD:
+        {
             return t * (2.0 - t);
+        }
             
         case EASE_IN_OUT_QUAD:
-            if (t < 0.5) return 2.0 * t * t;
-            return -1.0 + (4.0 - 2.0 * t) * t;
+        {
+            return (t < 0.5) ? (2.0 * t * t) 
+                             : (-1.0 + (4.0 - 2.0 * t) * t);
+        }
             
         case EASE_IN_CUBIC:
+        {
             return t * t * t;
+        }
             
         case EASE_OUT_CUBIC:
         {
@@ -1453,17 +1490,25 @@ f64 apply_easing(f64 t, easing_type easing)
         }
             
         case EASE_IN_OUT_CUBIC:
-            if (t < 0.5) return 4.0 * t * t * t;
-            return (t - 1.0) * (2.0 * t - 2.0) * (2.0 * t - 2.0) + 1.0;
+        {
+            return (t < 0.5) ? (4.0 * t * t * t) 
+                             : ((t - 1.0) * (2.0 * t - 2.0) * (2.0 * t - 2.0) + 1.0);
+        }
             
         case EASE_IN_SINE:
-            return 1.0 - (f64)cosf(t * M_PI_2);
+        {
+            return 1.0 - cos(t * M_PI_2);
+        }
             
         case EASE_OUT_SINE:
-            return (f64)sinf(t * M_PI_2);
+        {
+            return sin(t * M_PI_2);
+        }
             
         case EASE_IN_OUT_SINE:
-            return -0.5 * ((f64)cosf(M_PI * t) - 1.0);
+        {
+            return -0.5 * (cos(M_PI * t) - 1.0);
+        }
 
         case EASE_OUT_BOUNCE:
         {
@@ -1490,56 +1535,78 @@ f64 apply_easing(f64 t, easing_type easing)
                 return n1 * u * u + 0.984375;
             }
         }
+
         default:
-            return t;
-    }
-}
-
-void animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type easing) 
-{
-    for (i32 i = 0; i < animation_item_count; i++) 
-    {
-        animation_t *it = &animation_items[i];
-
-        // there already exists an animation 
-        if (it->id == id) 
         {
-            it->start = it->current;        // should continue from where it is ?
-            it->target = target;
-            it->elapsed = 0;
-            it->duration = duration;
-            it->easing = easing;
-            it->done = false;
-            return;
+            return t;
         }
     }
-
-    // push new item if we have room
-    if (animation_item_count < ANIMATION_MAX_ITEMS) 
-    {
-        animation_items[animation_item_count++] = (animation_t)
-        {
-            .id = id,
-            .start = start,
-            .current = start,
-            .target = target,
-            .easing = easing,
-            .duration = duration,
-            .elapsed = 0,
-            .done = false
-        };
-    }
 }
 
-void animation_stop(u64 id)
+static animation_t *animation_exists(u64 id, u32 *idx)
 {
     for (i32 i = 0; i < animation_item_count; i++)
     {
         if (animation_items[i].id == id)
         {
-            animation_items[i] = animation_items[--animation_item_count];
-            return;
+            *idx = i;
+            return &animation_items[i];
         }
+    }
+    return NULL;
+}
+ 
+
+bool animation_start(u64 id, f32 start, f32 target, f32 duration, easing_type easing) 
+{
+    u32 idx = 0;
+    animation_t *it = animation_exists(id, &idx);
+
+    if(it)
+    {
+        // there already exists an animation 
+        if (it->id == id) 
+        {
+            it->start = it->current;        // should continue from where it is or from start ?
+            it->target = target;
+            it->elapsed = 0;
+            it->duration = duration;
+            it->easing = easing;
+            it->done = false;
+            it->dest = NULL;
+            return true;
+        }
+    }
+
+    // we dont have room left
+    if (animation_item_count >= ANIMATION_MAX_ITEMS) 
+    {
+        return false;
+    }
+
+    animation_items[animation_item_count++] = (animation_t)
+    {
+        .id = id,
+        .start = start,
+        .current = start,
+        .target = target,
+        .easing = easing,
+        .duration = duration,
+        .elapsed = 0,
+        .done = false,
+        .dest = NULL
+    };
+
+    return true;
+}
+
+void animation_stop(u64 id)
+{
+    u32 idx = 0;
+    animation_t *it = animation_exists(id, &idx);
+    if(it)
+    {
+        animation_items[idx] = animation_items[--animation_item_count];
     }
 }
 
@@ -1557,6 +1624,10 @@ void animation_update(f64 dt)
             anim->done = true;
             // clamp it to target
             anim->current = anim->target;
+
+            if (anim->dest){
+                *anim->dest = anim->current;
+            }
             // remove it from the list when done
             // just replace it with the last item and decrement the count
             *anim = animation_items[--animation_item_count];
@@ -1576,49 +1647,67 @@ void animation_update(f64 dt)
 
 bool animation_get(u64 id, f32 *current)
 {
-    for (i32 i = 0; i < animation_item_count; i++) 
+    u32 idx = 0;
+    animation_t *it = animation_exists(id, &idx);
+    if(!it)
     {
-        animation_t *it = &animation_items[i];
-
-        if (it->id == id) {
-            *current = it->current;
-            return true;
-        }
+        return false;
     }
-    return false;
+    *current = it->current;
+    return true;
 }
 
-/* TODO remove static vars it doesnt work with diff ids simulataneously */
+static anim_pingpong_state_t *pingpong_find_or_create(u64 id)
+{
+    for (i32 i = 0; i < pingpong_state_count; i++)
+    {
+        if (pingpong_states[i].id == id){
+            return &pingpong_states[i];
+        }
+    }
+ 
+    if (pingpong_state_count < ANIM_PINGPONG_MAX)
+    {
+        pingpong_states[pingpong_state_count] = (anim_pingpong_state_t){ .id = id, .forward = true };
+        return &pingpong_states[pingpong_state_count++];
+    }
+    return NULL;
+}
+ 
 void animation_pingpong(u64 id, f32 start, f32 target, f32 duration, easing_type easing)
 {
-    static bool reached_top = false;
-    static bool reached_bottom = false;
-
     f32 begin = MIN(start, target);
-    f32 end = MAX(start, target);
-
-    f32 current = 0;
-
-    animation_get(id, &current);
-
-    if(current >= end-EPSILON_F32 && !reached_top)
-    {
-        animation_start((u64)&current, end, begin, duration, easing);
-        reached_bottom = false;
-        reached_top = true;
+    f32 end   = MAX(start, target);
+ 
+    anim_pingpong_state_t *st = pingpong_find_or_create(id);
+    if (!st){
+        return; 
     }
-    else if(current <= begin+EPSILON_F32 && !reached_bottom)
+ 
+    f32  current = 0;
+    bool running = animation_get(id, &current);
+ 
+    if (running)
+        return;
+ 
+    if (st->forward)
     {
-        animation_start((u64)&current ,begin, end, duration, easing);
-        reached_top = false;
-        reached_bottom = true;
+        animation_start(id, begin, end, duration, easing);
     }
+    else
+    {
+        animation_start(id, end, begin, duration, easing);
+    }
+ 
+    st->forward = !st->forward;
 }
 
 void animation_chain_start(u64 id, f32 start, 
                       animation_t *steps, i32 step_count)
 {
-    if (step_count <= 0) return;
+    if (step_count <= 0|| step_count > ANIM_CHAIN_MAX_STEPS) {
+        return;
+    }
 
     anim_chain_t *chain = NULL;
     for (i32 i = 0; i < anim_chain_count; i++) {
@@ -1627,7 +1716,7 @@ void animation_chain_start(u64 id, f32 start,
             break;
         }
     }
-    if (!chain && anim_chain_count < 32) {
+    if (!chain && anim_chain_count < ANIM_CHAIN_MAX) {
         chain = &anim_chains[anim_chain_count++];
     }
     if (!chain) return;
@@ -1638,7 +1727,6 @@ void animation_chain_start(u64 id, f32 start,
     memcpy(chain->steps, steps, step_count * sizeof(animation_t));
 
     animation_start(id, start, steps[0].target, steps[0].duration, steps[0].easing);
-
 }
 
 void animation_chain_update(void)
@@ -1662,12 +1750,11 @@ void animation_chain_update(void)
         if (!last_step && !step_running)
         {
             /* Advance to the next step. */
-            f32 current = 0;
-            animation_get(chain->chain_id, &current);  
+            f32 finished_target = chain->steps[chain->current_step].target;
 
             chain->current_step++;
             animation_t *next = &chain->steps[chain->current_step];
-            animation_start(chain->chain_id, current, next->target, next->duration, next->easing);
+            animation_start(chain->chain_id, finished_target, next->target, next->duration, next->easing);
         }
     }
 }
@@ -1687,6 +1774,20 @@ void animation_rank_start(u64 id, animation_t *members, i32 member_count)
     if (!rank && anim_rank_count < ANIM_RANK_MAX) {
         rank = &anim_ranks[anim_rank_count++];
     }
+
+    if (rank)
+    {
+        /* when rank exists but member counts dont match */
+        for (i32 j = member_count; j < rank->member_count; j++)
+        {
+            animation_stop(rank->member_ids[j]);
+        }
+    }
+    else if (anim_rank_count < ANIM_RANK_MAX)
+    {
+        rank = &anim_ranks[anim_rank_count++];
+    }
+
     if (!rank) return;
 
     rank->rank_id      = id;
@@ -1704,31 +1805,39 @@ void animation_rank_start(u64 id, animation_t *members, i32 member_count)
 
 void animation_rank_stop(u64 id)
 {
-    for (i32 i = 0; i < anim_rank_count; i++) {
+    for (i32 i = 0; i < anim_rank_count; i++) 
+    {
         anim_rank_t *rank = &anim_ranks[i];
         if (rank->rank_id != id) continue;
 
         for (i32 j = 0; j < rank->member_count; j++)
+        {
             animation_stop(rank->member_ids[j]);
+        }
 
         anim_ranks[i] = anim_ranks[--anim_rank_count];
         return;
     }
 }
 
-/* Fills out_values[member_count] with each member's current value.
-   Returns true while at least one member is still running. */
 bool animation_rank_get(u64 id, f32 *out_values, i32 out_count)
 {
-    for (i32 i = 0; i < anim_rank_count; i++) {
+    for (i32 i = 0; i < anim_rank_count; i++)
+    {
         anim_rank_t *rank = &anim_ranks[i];
-        if (rank->rank_id != id) continue;
-
-        i32 n = MIN(out_count, rank->member_count);
+        if (rank->rank_id != id)
+            continue;
+ 
+        i32  n           = MIN(out_count, rank->member_count);
+        bool any_running = false;
+ 
         for (i32 j = 0; j < n; j++)
-            animation_get(rank->member_ids[j], &out_values[j]);
-
-        return true;
+        {
+            if (animation_get(rank->member_ids[j], &out_values[j]))
+                any_running = true;
+        }
+ 
+        return any_running;
     }
     return false;
 }
@@ -1750,6 +1859,51 @@ void animation_rank_update(void)
         if (!any_running)
             anim_ranks[i] = anim_ranks[--anim_rank_count];
     }
+}
+
+void anim_set_ex(f32 *val, f32 target, f32 duration, easing_type easing)
+{
+    u64 id = (u64)(uintptr_t)val;
+ 
+    u32 idx = 0;
+    animation_t *it = animation_exists(id,&idx);
+    if (it)
+    {
+        it->start    = it->current;
+        it->target   = target;
+        it->elapsed  = 0;
+        it->duration = duration;
+        it->easing   = easing;
+        it->done     = false;
+        it->dest     = val;
+        return;
+    }
+ 
+    if (animation_item_count >= ANIMATION_MAX_ITEMS)
+        return;
+ 
+    animation_items[animation_item_count++] = (animation_t)
+    {
+        .id       = id,
+        .start    = *val,
+        .current  = *val,
+        .target   = target,
+        .easing   = easing,
+        .duration = duration,
+        .elapsed  = 0,
+        .done     = false,
+        .dest     = val,
+    };
+}
+ 
+void anim_set(f32 *val, f32 target)
+{
+    anim_set_ex(val, target, 0.25f, EASE_OUT_QUAD);
+}
+ 
+void anim_set_stop(f32 *val)
+{
+    animation_stop((u64)(uintptr_t)val);
 }
 
 #define MORPH_ID_X(m, i)  ((m)->id_base + (u64)(i))
@@ -2049,7 +2203,7 @@ const char* get_file_extension(const char *filepath)
     return dot+1;
 }
 
-uint64_t get_file_mod_time(const char *path)
+u64 get_file_mod_time(const char *path)
 {
     #ifdef _WIN32
         WIN32_FILE_ATTRIBUTE_DATA attr;
@@ -2065,7 +2219,32 @@ uint64_t get_file_mod_time(const char *path)
     #endif
 }
 
-unsigned char* read_file(const char* font_path)
+u64 get_file_creation_time(const char *path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA attr;
+    GetFileAttributesExA(path, GetFileExInfoStandard, &attr);
+    ULARGE_INTEGER ull;
+    ull.LowPart = attr.ftCreationTime.dwLowDateTime;
+    ull.HighPart = attr.ftCreationTime.dwHighDateTime;
+    return ull.QuadPart;
+}
+
+u64 get_file_size(const char *FileName) 
+{
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+
+    if (!GetFileAttributesExA(FileName, GetFileExInfoStandard, &fad)) {
+        return -1;
+    }
+
+    LARGE_INTEGER size;
+    size.HighPart = fad.nFileSizeHigh;
+    size.LowPart  = fad.nFileSizeLow;
+
+    return size.QuadPart;
+}
+
+char* read_file(const char* font_path)
 {
     FILE *f = fopen(font_path, "rb");
     if (!f) {
@@ -2077,7 +2256,7 @@ unsigned char* read_file(const char* font_path)
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
     
-    unsigned char *buffer = malloc(size);
+    char *buffer = malloc(size+1);
     if (!buffer) {
         printf("Failed to allocate font buffer\n");
         fclose(f);
@@ -2093,6 +2272,7 @@ unsigned char* read_file(const char* font_path)
         buffer = NULL;
         return NULL;
     }
+    buffer[size] = '\0';    
     return buffer;
 }
 
@@ -2271,8 +2451,7 @@ void* consume_size(Data* d, u32 size)
     return result;
 }
 
-static i32
-is_letter(char c){
+static i32 is_letter(char c){
     i32 result = 0;
     if ((c >= 'A' && c <= 'Z') ||
         (c >= 'a' && c <= 'z')){
@@ -2281,8 +2460,7 @@ is_letter(char c){
     return(result);
 }
 
-static char
-to_upper(char c){
+static char to_upper(char c){
     if (c >= 'a' && c <= 'z'){
         c += 'A' - 'a';
     }
@@ -2698,7 +2876,8 @@ unsigned long get_allocation_granularity(void)
         int logicalProcessors = 0;
         
         for (DWORD i = 0; i < count; i++) {
-            switch (pBuffer[i].Relationship) {
+            switch (pBuffer[i].Relationship) 
+            {
                 case RelationProcessorCore:
                     physicalCores++;
                     printf("Core %d: ", physicalCores);
@@ -2765,6 +2944,48 @@ void thread_sleep(uint32_t milliseconds)
     #endif
 }
 
+#if defined(_WIN32)
+#define CPU_PAUSE() _mm_pause()
+#else
+#if defined(__x86_64__) || defined(__i386__)
+#define CPU_PAUSE() _mm_pause()
+#else
+#define CPU_PAUSE() ((void)0)
+#endif
+#endif
+
+#define SLEEP_SPIN_MARGIN 0.002
+
+void precise_sleep(f64 seconds)
+{
+    if (seconds <= 0.0) return;
+
+    f64 start  = get_current_time();
+    f64 target = start + seconds;
+
+    for (;;) 
+    {
+        f64 now = get_current_time();
+        f64 remaining = target - now;
+
+        if (remaining <= SLEEP_SPIN_MARGIN)
+            break;
+
+        f64 sleep_time = remaining - SLEEP_SPIN_MARGIN;
+        uint32_t ms = (uint32_t)(sleep_time * 1000.0);
+
+        if (ms == 0)
+            break;
+
+        thread_sleep(ms);
+    }
+
+    while (get_current_time() < target) 
+    {
+        CPU_PAUSE(); 
+    }
+}
+
 void atomic_inc(atomic_int_t* var)
 {
     #ifdef _WIN32
@@ -2783,6 +3004,15 @@ void atomic_dec(atomic_int_t* var)
     #endif
 }
 
+void atomic_store_int(atomic_int_t* var, int value)
+{
+#ifdef _WIN32
+    InterlockedExchange(var, value);
+#else
+    atomic_store(var, value);
+#endif
+}
+
 int atomic_load_int(atomic_int_t* var)
 {
     #ifdef _WIN32
@@ -2790,6 +3020,67 @@ int atomic_load_int(atomic_int_t* var)
     #else
         return atomic_load(var);
     #endif
+}
+
+int atomic_add(atomic_int_t* var, int value) 
+{
+#ifdef _WIN32
+    return InterlockedAdd(var, value);
+#else
+    return var->fetch_add(value, std::memory_order_relaxed);
+#endif
+}
+
+int atomic_exchange(atomic_int_t* var, int value)
+{
+#ifdef _WIN32
+    return InterlockedExchange(var, value);
+#else
+    return atomic_exchange(var, value);
+#endif
+}
+
+int atomic_cas(atomic_int_t* var, int expected, int desired)
+{
+#ifdef _WIN32
+    return InterlockedCompareExchange(var, desired, expected) == expected;
+#else
+    int e = expected;
+    return atomic_compare_exchange_strong(var, &e, desired);
+#endif
+}
+
+void cpu_relax(void)
+{
+#ifdef _WIN32
+    YieldProcessor(); YieldProcessor(); YieldProcessor(); YieldProcessor();
+#elif defined(__x86_64__) || defined(__i386__)
+    _mm_pause();
+#else
+    /* fall back to compiler barrier */
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+void os_yield(void)
+{
+#ifdef _WIN32
+    SwitchToThread();        /* yield to a thread on the same CPU */
+#else
+    sched_yield();
+#endif
+}
+
+void pin_thread(HANDLE thread, u32 core_id)
+{
+#ifdef _WIN32
+    SetThreadAffinityMask(thread, (DWORD_PTR)1 << core_id);
+#else
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+    pthread_setaffinity_np(thread, sizeof(cpuset), &cpuset);
+#endif
 }
 
 thread_handle_t create_thread(thread_func_t func, thread_func_param_t data)
@@ -2816,6 +3107,29 @@ void join_thread(thread_handle_t thread)
     #else
         pthread_join(thread, NULL);
     #endif
+}
+
+void spin_init(spinlock_t* s)
+{ 
+    atomic_exchange(&s->locked, 0); 
+}
+
+void spin_lock(spinlock_t* s)
+{
+    for (;;) 
+    {
+        if (!atomic_exchange(&s->locked, 1)){
+            return;
+        }
+        while (atomic_load_int(&s->locked)){
+            cpu_relax();
+        }
+    }
+}
+
+void spin_unlock(spinlock_t* s)
+{
+    atomic_exchange(&s->locked, 0);
 }
 
 void mutex_init(mutex_handle_t* mutex)
@@ -2974,7 +3288,6 @@ bool event_activate(void *event)
 #endif
 }
 
-
 #define EVENT_QUEUE_CAPACITY 256   /* must be a power of two */
 
 typedef enum {
@@ -3013,7 +3326,7 @@ void eq_init(EventQueue *eq)
 void eq_destroy(EventQueue *eq)
 {
     mutex_destroy(&eq->lock);
-cond_destroy(&eq->not_empty);
+    cond_destroy(&eq->not_empty);
 }
 
 void eq_push(EventQueue *eq, const Event *e)
@@ -3024,7 +3337,7 @@ void eq_push(EventQueue *eq, const Event *e)
     if (next != eq->tail) {          /* drop silently if full */
         eq->buf[eq->head] = *e;
         eq->head = next;
-cond_signal(&eq->not_empty); 
+        cond_signal(&eq->not_empty); 
     }
 
     mutex_unlock(&eq->lock);
@@ -3361,11 +3674,11 @@ int spawn_process_async(process_t *proc, const char *command)
 #endif
 }
 
-#define BUFFER_SIZE 1024
+#define PROC_BUF_SIZE 1024
 
 void check_process_output_async(process_t *proc) 
 {
-    char buffer[BUFFER_SIZE];
+    char buffer[PROC_BUF_SIZE];
 
 #ifdef _WIN32
     DWORD bytes_read;
@@ -3474,3 +3787,168 @@ int check_process_status_async(process_t *proc)
     }
 #endif
 }
+
+#if 0
+/*  */
+struct BandwidthResult {
+    double gbps;
+    double seconds;
+};
+
+struct BenchmarkContext {
+    const u8* data;
+    size_t size_bytes;
+    u32 n_threads;
+
+    mutex_handle_t mutex;
+    cond_handle_t ready_cond;   
+    cond_handle_t start_cond;  
+    int ready_threads;
+    int start_signal;
+
+    BenchmarkContext(const u8* data, size_t size_bytes, u32 n_threads): data(data), size_bytes(size_bytes), n_threads(n_threads), ready_threads(0), start_signal(false)
+    {
+        mutex_init(&mutex);
+        cond_init(&ready_cond);
+        cond_init(&start_cond);
+    }
+
+};
+
+struct BenchmarkThreadData {
+    u32 tid;
+    BenchmarkContext* ctx;
+    u64 partial_sum;
+};
+
+std::atomic<u64> g_sink{0}; 
+
+thread_func_ret_t benchmark_worker_func(thread_func_param_t arg)
+{
+    BenchmarkThreadData* td = (BenchmarkThreadData*)arg;
+    BenchmarkContext* ctx = td->ctx;
+    
+    i32 tid = td->tid;
+    i32 n_threads = ctx->n_threads;
+    size_t size_bytes = ctx->size_bytes;
+    const u8* data = ctx->data;
+
+    size_t chunk = size_bytes / n_threads;
+    const u8* p = data + tid * chunk;
+    size_t len = (tid == n_threads - 1) ? (size_bytes - tid * chunk) : chunk;
+
+    mutex_lock(&ctx->mutex);
+    ctx->ready_threads++;
+    if (ctx->ready_threads == n_threads) {
+        cond_signal(&ctx->ready_cond);
+    }
+    while (ctx->start_signal == 0) {
+        cond_wait(&ctx->start_cond, &ctx->mutex);
+    }
+    mutex_unlock(&ctx->mutex);
+
+    u64 sum0 = 0;
+    u64 sum1 = 0;
+    u64 sum2 = 0;
+    u64 sum3 = 0;
+
+    for (size_t i = 0; i + 32 <= len; i += 32) {
+        sum0 += *(const u64*)(p + i + 0);
+        sum1 += *(const u64*)(p + i + 8);
+        sum2 += *(const u64*)(p + i + 16);
+        sum3 += *(const u64*)(p + i + 24);
+    }
+
+    u64 sum = sum0 + sum1 + sum2 + sum3;
+    td->partial_sum = sum;
+    
+    return 0;
+}
+
+BandwidthResult bandwidth_run_once(const void* data, size_t size_bytes, u32 n_threads)
+{
+    BenchmarkContext ctx((const u8*)data, size_bytes,n_threads);
+
+    std::vector<BenchmarkThreadData> tdata(n_threads);
+    std::vector<thread_handle_t> handles(n_threads);
+
+    for (u32 t = 0; t < n_threads; t++) {
+        tdata[t].tid = t;
+        tdata[t].ctx = &ctx;
+        tdata[t].partial_sum = 0;
+        handles[t] = create_thread((thread_func_t)benchmark_worker_func, (thread_func_param_t)&tdata[t]);
+    }
+
+    mutex_lock(&ctx.mutex);
+    while (ctx.ready_threads < (int)n_threads) {
+        cond_wait(&ctx.ready_cond, &ctx.mutex);
+    }
+    auto t0 = std::chrono::high_resolution_clock::now();
+    ctx.start_signal = 1;
+    cond_broadcast(&ctx.start_cond);
+    mutex_unlock(&ctx.mutex);
+
+    for (u32 t = 0; t < n_threads; t++) {
+        join_thread(handles[t]);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    mutex_destroy(&ctx.mutex);
+    cond_destroy(&ctx.ready_cond);
+    cond_destroy(&ctx.start_cond);
+
+    u64 check = 0;
+    for (u32 t = 0; t < n_threads; t++) {
+        check += tdata[t].partial_sum;
+    }
+    
+    g_sink.fetch_add(check, std::memory_order_relaxed);
+
+    double secs = std::chrono::duration<double>(t1 - t0).count();
+    double gb   = size_bytes / (1024.0 * 1024.0 * 1024.0);
+    
+    return { gb / secs, secs };
+}
+
+void bandwidth_benchmark_suite(const void* data, size_t size_bytes, u32 n_threads, u32 n_iters = 10)
+{
+    double gb = size_bytes / (1024.0 * 1024.0 * 1024.0);
+    std::println("Benchmarking {:.2f} GB with {} threads, {} iterations", gb, n_threads, n_iters);
+    std::println("{:>4} {:>10} {:>10}", "run", "GB/s", "ms");
+    std::println("----------------------------");
+
+    std::vector<double> gbps_results;
+    gbps_results.reserve(n_iters);
+
+    for (u32 i = 0; i < n_iters; i++)
+    {
+        auto r = bandwidth_run_once(data, size_bytes, n_threads);
+        gbps_results.push_back(r.gbps);
+        std::println("{:>4} {:>10.2f} {:>10.2f}", i, r.gbps, r.seconds * 1000.0);
+    }
+
+    double min_gbps = *std::min_element(gbps_results.begin(), gbps_results.end());
+    double max_gbps = *std::max_element(gbps_results.begin(), gbps_results.end());
+    double sum = 0.0;
+    for (double v : gbps_results){
+        sum += v;
+    }
+    double avg_gbps = sum / gbps_results.size();
+    double var = 0.0;
+    for (double v : gbps_results){
+        var += (v - avg_gbps) * (v - avg_gbps);
+    }
+    double stddev = std::sqrt(var / gbps_results.size());
+    
+    std::println("----------------------------");
+    std::println("min: {:.2f} GB/s", min_gbps);
+    std::println("max: {:.2f} GB/s", max_gbps);
+    std::println("avg: {:.2f} GB/s", avg_gbps);
+    std::println("std: {:.2f} GB/s", stddev);
+    std::println("");
+    std::println("Theoretical max tok/s bound:");
+    std::println("  worst-case (min bw): {:.2f} tok/s", min_gbps / gb);
+    std::println("  typical    (avg bw): {:.2f} tok/s", avg_gbps / gb);
+    std::println("  best-case  (max bw): {:.2f} tok/s", max_gbps / gb);
+}
+#endif

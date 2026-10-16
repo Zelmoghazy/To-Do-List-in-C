@@ -46,7 +46,9 @@ color4_t linear_to_gamma(color4_t color)
 }
 
 /*
-    The definition uses two different functions – a straight line and an exponential curve – glued together at a certain “cutoff point”.
+    The definition uses two different functions glued together at a certain “cutoff point”.
+        – a straight line 
+        - an exponential curve  
     The implication is that these functions (the ones in the sRGB to Linear definition) intersect at the point: (0.04045, 0.0031308)
     - condition : 0 ≤ S ≤ 0.0404482362771082 , value L = S/12.92
     - condition : 0.0404482362771082 < S ≤ 1, L = ((S+0.055)/1.055)^2.4
@@ -508,8 +510,8 @@ void clear_screen(image_view_t const *color_buf, color4_t const color)
 }
 
 void clear_screen_radial_gradient(image_view_t const *color_buf,
-                                       color4_t const color0,
-                                       color4_t const color1)
+                                  color4_t const color0,
+                                  color4_t const color1)
 {
     f32 center_x = color_buf->width * 0.5f;
     f32 center_y = color_buf->height * 0.5f;
@@ -1414,23 +1416,26 @@ void draw_rounded_rectangle_filled_aa(image_view_t *img, i32 x1, i32 y1, i32 x2,
     i32 h = y2 - y1 + 1;
     
     // Clamp radius to valid range
-    radius = Clamp(0.0f, radius, (f32)MIN(w, h) / 2.0f);
+    radius = Clamp(0.0f, radius, (f32)MIN(w, h) * 0.5f);
 
     // No rounding - draw regular rect
-    if (radius <= 1.0f) {
+    if (radius < 0.5f) {
         draw_rect_solid(img, x1, y1, x2, y2, color);
         return;
     }
 
     // Special cases
-    if (x1 == x2) {
+    if (x1 == x2) 
+    {
         if (y1 == y2) {
             draw_pixel(img, x1, y1, color);
         } else {
             draw_vline(img, x1, y1, y2, color);
         }
         return;
-    } else if (y1 == y2) {
+    } 
+    else if (y1 == y2) 
+    {
         draw_hline(img, y1, x1, x2, color);
         return;
     }
@@ -1443,64 +1448,60 @@ void draw_rounded_rectangle_filled_aa(image_view_t *img, i32 x1, i32 y1, i32 x2,
     f32 radiusX2 = radius * radius;
     f32 radiusY2 = radius * radius;
     
-    i32 quarter = (i32)roundf(radiusX2 / d_sqrt(radiusX2 + radiusY2));
-    
-    for (i32 x = 0; x <= quarter; x++)
+    i32 quarter = (i32)roundf(radiusX2 / sqrtf(radiusX2 + radiusY2));
+    i32 prev_y_floor = -9999; 
+
+    for (i32 x = 1; x < quarter; x++)
     {
-        f32 y = radius * d_sqrt(1.0f - (f32)(x * x) / radiusX2);
+        f32 y = radius * sqrtf(1.0f - (f32)(x * x) / radiusX2);
         f32 error = y - floorf(y);
         
         u8 transparency = (u8)(error * 255.0f);
         i32 y_floor = (i32)floorf(y);
         
-        draw_hline(img, cy_top - y_floor, cx_left - x, cx_left + x, color);
+        if (y_floor != prev_y_floor) 
+        {
+            draw_hline(img, cy_top - y_floor, cx_left - x, cx_left-1, color);
+            draw_hline(img, cy_top - y_floor, cx_right+1, cx_right + x, color);
+            draw_hline(img, cy_bottom + y_floor, cx_left - x, cx_left-1, color);
+            draw_hline(img, cy_bottom + y_floor, cx_right+1, cx_right + x, color);
+        } 
+        else 
+        {
+            draw_hline(img, cy_top - y_floor, cx_left - x, cx_left - x, color);
+            draw_hline(img, cy_top - y_floor, cx_right + x, cx_right + x, color);
+            draw_hline(img, cy_bottom + y_floor, cx_left - x, cx_left - x, color);
+            draw_hline(img, cy_bottom + y_floor, cx_right + x, cx_right + x, color);
+        }
 
-        set_pixel_weighted(img, cx_left + x, cy_top - y_floor - 1, color, transparency);
-        set_pixel_weighted(img, cx_left - x, cy_top - y_floor - 1, color, transparency);
-        
-        draw_hline(img, cy_top - y_floor, cx_right - x, cx_right + x, color);
-
+        set_pixel_weighted(img, cx_left - x, cy_top - y_floor-1, color, transparency);
         set_pixel_weighted(img, cx_right + x, cy_top - y_floor - 1, color, transparency);
-        set_pixel_weighted(img, cx_right - x, cy_top - y_floor - 1, color, transparency);
-        
-        draw_hline(img, cy_bottom + y_floor, cx_left - x, cx_left + x, color);
-
-        set_pixel_weighted(img, cx_left + x, cy_bottom + y_floor + 1, color, transparency);
         set_pixel_weighted(img, cx_left - x, cy_bottom + y_floor + 1, color, transparency);
-        
-        draw_hline(img, cy_bottom + y_floor, cx_right - x, cx_right + x, color);
-
         set_pixel_weighted(img, cx_right + x, cy_bottom + y_floor + 1, color, transparency);
-        set_pixel_weighted(img, cx_right - x, cy_bottom + y_floor + 1, color, transparency);
+        
+        prev_y_floor = y_floor;
     }
     
-    quarter = (i32)roundf(radiusY2 / d_sqrt(radiusX2 + radiusY2));
+    quarter = (i32)roundf(radiusY2 / sqrtf(radiusX2 + radiusY2));
     
-    for (i32 y = 0; y <= quarter; y++)
+    for (i32 y = 1; y <= quarter; y++)
     {
-        f32 x = radius * d_sqrt(1.0f - (f32)(y * y) / radiusY2);
+        f32 x = radius * sqrtf(1.0f - (f32)(y * y) / radiusY2);
         f32 error = x - floorf(x);
         
         u8 transparency = (u8)(error * 255.0f);
         i32 x_floor = (i32)floorf(x);
 
-        draw_hline(img, cy_top - y, cx_left - x_floor, cx_left + x_floor, color);
+        draw_hline(img, cy_top - y, cx_left - x_floor, cx_left-1 , color);
+        draw_hline(img, cy_top - y, cx_right + 1, cx_right + x_floor, color);
+        draw_hline(img, cy_bottom + y, cx_left - x_floor, cx_left-1, color);
+        draw_hline(img, cy_bottom + y, cx_right+1, cx_right + x_floor, color);
 
         set_pixel_weighted(img, cx_left - x_floor - 1, cy_top - y, color, transparency);
-        
-        draw_hline(img, cy_top - y, cx_right - x_floor, cx_right + x_floor, color);
-
         set_pixel_weighted(img, cx_right + x_floor + 1, cy_top - y, color, transparency);
-        
-        draw_hline(img, cy_bottom + y, cx_left - x_floor, cx_left + x_floor, color);
-
         set_pixel_weighted(img, cx_left - x_floor - 1, cy_bottom + y, color, transparency);
-        
-        draw_hline(img, cy_bottom + y, cx_right - x_floor, cx_right + x_floor, color);
-
         set_pixel_weighted(img, cx_right + x_floor + 1, cy_bottom + y, color, transparency);
     }
-    
     draw_rect_solid(img, x1, cy_top, x2, cy_bottom, color);
     
     draw_rect_solid(img, cx_left, y1, cx_right, cy_top - 1, color);
@@ -1541,7 +1542,6 @@ void draw_filled_polygon(image_view_t *img, const i32 *vx, const i32 *vy, i32 n,
         if (vy[i] > maxy) maxy = vy[i];
     }
 
-    // i32 *intersections = (i32 *)malloc(sizeof(i32) * n);
     i32 intersections[MAX_POLY_CORNERS];
 
     for (i32 y = miny; y <= maxy; y++) 

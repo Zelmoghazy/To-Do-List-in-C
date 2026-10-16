@@ -1,16 +1,13 @@
 #ifndef F32X4_H
 #define F32X4_H
 
-#include <xmmintrin.h>  // SSE
-#include <emmintrin.h>  // SSE2
-#include <immintrin.h>  // AVX
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
 
-typedef __m128  f32x4;
-typedef __m256  f32x8;
-typedef __m256d f64x4;
+#include <xmmintrin.h>  // SSE
+#include <emmintrin.h>  // SSE2
+#include <immintrin.h>  // AVX
 
 #if defined(_WIN32)
   #include <intrin.h>
@@ -21,6 +18,10 @@ typedef __m256d f64x4;
   #define cpuid(leaf, a, b, c, d)            __get_cpuid(leaf, &a, &b, &c, &d)
   #define cpuid_count(leaf, sub, a, b, c, d) __get_cpuid_count(leaf, sub, &a, &b, &c, &d)
 #endif
+
+typedef __m128  f32x4;
+typedef __m256  f32x8;
+typedef __m256d f64x4;
 
 typedef struct {
     // --- f32x4 (SSE / SSE2) ---
@@ -45,7 +46,7 @@ static inline SIMD_Caps simd_query_caps(void)
     SIMD_Caps caps = {0};
     uint32_t eax, ebx, ecx, edx;
 
-    // ── Leaf 1: SSE family + FMA ─────────────────────────────────────────────
+    // SSE family + FMA
     cpuid(1, eax, ebx, ecx, edx);
     caps.sse    = (edx >> 25) & 1;
     caps.sse2   = (edx >> 26) & 1;
@@ -55,7 +56,7 @@ static inline SIMD_Caps simd_query_caps(void)
     caps.fma    = (ecx >> 12) & 1;
     caps.avx    = (ecx >> 28) & 1;
 
-    // ── Leaf 7: AVX2 / AVX-512 ───────────────────────────────────────────────
+    // AVX2 / AVX-512
     cpuid_count(7, 0, eax, ebx, ecx, edx);
     caps.avx2    = (ebx >>  5) & 1;
     caps.avx512f = (ebx >> 16) & 1;
@@ -85,7 +86,6 @@ static inline int simd_supports_all(const SIMD_Caps *c)
         && simd_supports_fma(c);
 }
 
-// ── Debug print ──────────────────────────────────────────────────────────────
 static inline void simd_print_caps(const SIMD_Caps *c)
 {
     printf("SIMD Capabilities:\n");
@@ -541,6 +541,18 @@ static inline f32x8 f32x8_load(const float *ptr)
     return _mm256_loadu_ps(ptr);
 }
 
+static inline f32x8 f32x8_load_i8(const int8_t* ptr) 
+{
+    __m128i i8 = _mm_loadl_epi64((const __m128i*)ptr);
+    __m256i i32 = _mm256_cvtepi8_epi32(i8);
+    return _mm256_cvtepi32_ps(i32);
+}
+
+static inline f32x8 f32x8_from_i32(__m256i v) 
+{
+    return _mm256_cvtepi32_ps(v);
+}
+
 static inline f32x8 f32x8_load_aligned(const float *ptr) 
 {
     return _mm256_load_ps(ptr);
@@ -864,7 +876,7 @@ static inline f32x8 f32x8_sort(f32x8 v)
 {
     f32x8 a, b, lo, hi;
 
-    #define CMP_SWAP(reg, shuf, blend_mask)          \
+    #define CMP_SWAP(reg, shuf, blend_mask)           \
         a  = reg;                                     \
         b  = _mm256_shuffle_ps(reg, reg, shuf);       \
         lo = _mm256_min_ps(a, b);                     \
@@ -906,7 +918,6 @@ static inline f32x8 f32x8_sort(f32x8 v)
 // ============================================================================
 // Print Helper
 // ============================================================================
-
 
 static inline void f32x8_print(f32x8 v, const char *name) 
 {
